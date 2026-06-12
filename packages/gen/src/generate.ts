@@ -1,0 +1,346 @@
+// Constructive map generator — the marble-run switchback band, ported from v1's
+// design (see ../gravguess GAME.md) with one major v2 upgrade: construction by
+// simulation. v1 placed catch ramps using a fixed 170px margin tuned to Matter's
+// speeds; our sim is cheap enough to PROBE the partial map after every ramp and
+// place the next high end exactly where the measured ball lands (plus slack).
+// Catches are guaranteed by construction, not estimated.
+//
+// v1 invariants still honored:
+//   - NO turn guards — re-convergence comes from catch geometry only.
+//   - Every traversal surface tilted >= ~0.15 rad; only basins are flat.
+//   - Planned-travel ledger: keep adding structure until designed path is long enough.
+//   - One chaos element (bumper), placed where downstream geometry re-converges it.
+// Validity is still NOT guaranteed — the validator gates every candidate.
+
+import {
+  createRun,
+  LOGICAL_HEIGHT,
+  LOGICAL_WIDTH,
+  prngFromSeed,
+  step,
+  type BoostPad,
+  type Bumper,
+  type MapDef,
+  type Surface,
+  type Vec2,
+} from "@gravguess/sim";
+
+export type ArchetypeName = "sweep" | "stairs" | "kicker";
+
+interface Archetype {
+  name: ArchetypeName;
+  /** Ramp horizontal extent as a fraction of canvas width [min, max]. */
+  rampLen: [number, number];
+  /** Vertical drop from a lip to the next ramp's high end, px. */
+  hop: [number, number];
+  /** Surface tilt (dy/dx). */
+  tilt: [number, number];
+  /** Maximum switchback ramps (the travel ledger decides when to stop). */
+  maxRamps: number;
+  /** Per-ramp probability of surface variants (non-first ramps only). */
+  iceP: number;
+  trampP: number;
+  conveyP: number;
+}
+
+// Personalities adapted from v1's ARCH table (incl. its surface-variant odds).
+// Tilts/hops sized so enough switchbacks fit the 640px vertical budget to
+// clear the reversals gate. Trampolines stay rare — bouncing down a switchback
+// is fun once, but the catch margins can't contain more than that.
+const ARCHETYPES: Archetype[] = [
+  { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 5, iceP: 0.22, trampP: 0.05, conveyP: 0.14 },
+  { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 7, iceP: 0.2, trampP: 0.1, conveyP: 0.16 },
+  { name: "kicker", rampLen: [0.3, 0.44], hop: [42, 56], tilt: [0.18, 0.22], maxRamps: 4, iceP: 0.2, trampP: 0.08, conveyP: 0.12 },
+];
+
+const W = LOGICAL_WIDTH;
+const H = LOGICAL_HEIGHT;
+const SIDE_MARGIN = 40;
+const FLOOR_Y = 632;
+const PLANNED_TRAVEL_TARGET = 2.0 * W;
+// High end extends this far past the MEASURED landing point: room for the
+// landing bounce plus the post-impact uphill roll before the ball turns back.
+const CATCH_SLACK = 160;
+const RAMP = { restitution: 0.25, friction: 0.3 };
+
+export interface GeneratedMap {
+  map: MapDef;
+  archetype: ArchetypeName;
+  plannedTravel: number;
+  rampIds: string[];
+}
+
+interface ProbeSample {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+}
+
+/** Simulate the partial map and return the per-tick trajectory. */
+function probe(
+  surfaces: Surface[],
+  bumpers: Bumper[],
+  pads: BoostPad[],
+  spawn: Vec2,
+): ProbeSample[] {
+  const map: MapDef = { id: "probe", spawn, ballRadius: 10, surfaces, bumpers, pads };
+  const s = createRun(map);
+  const samples: ProbeSample[] = [];
+  while (!s.done) {
+    step(s);
+    samples.push({ x: s.px, y: s.py, vx: s.vx, vy: s.vy });
+  }
+  return samples;
+}
+
+/**
+ * Find where the ball, after passing the lip travelling in `dir`, first crosses
+ * `altitude` while moving down. Returns null if it never does (e.g. stuck).
+ */
+function findCrossing(
+  samples: ProbeSample[],
+  lipX: number,
+  dir: 1 | -1,
+  altitude: number,
+): ProbeSample | null {
+  let pastLip = false;
+  for (const p of samples) {
+    if (!pastLip && (p.x - lipX) * dir > 2) pastLip = true;
+    if (pastLip && p.vy > 0 && p.y >= altitude) return p;
+  }
+  return null;
+}
+
+export function buildMap(seed: string): GeneratedMap {
+  const rng = prngFromSeed(seed);
+  const pick = (lo: number, hi: number) => lo + rng() * (hi - lo);
+  const pickInt = (lo: number, hi: number) => lo + Math.floor(rng() * (hi - lo + 1));
+  const arch = ARCHETYPES[Math.floor(rng() * ARCHETYPES.length)]!;
+
+  const surfaces: Surface[] = [
+    { id: "wall-left", a: { x: 12, y: 0 }, b: { x: 12, y: H }, restitution: 0.4, friction: 0.1, kind: "wall" },
+    { id: "wall-right", a: { x: W - 12, y: 0 }, b: { x: W - 12, y: H }, restitution: 0.4, friction: 0.1, kind: "wall" },
+    // Slipperier than first-light's floor: the long end-of-run slide is part of
+    // the journey (travel + span) and lets landing positions scatter readably.
+    { id: "floor", a: { x: 0, y: FLOOR_Y }, b: { x: W, y: FLOOR_Y }, restitution: 0.15, friction: 0.9, kind: "basin" },
+  ];
+  const bumpers: Bumper[] = [];
+  const pads: BoostPad[] = [];
+  const rampIds: string[] = [];
+
+  /** Surface physics per variant kind. */
+  const variantFor = (roll: number): { kind: "ramp" | "ice" | "trampoline" | "conveyor"; restitution: number; friction: number } => {
+    if (roll < arch.conveyP) return { kind: "conveyor", restitution: 0.2, friction: 0.5 };
+    if (roll < arch.conveyP + arch.iceP) return { kind: "ice", restitution: 0.2, friction: 0.02 };
+    if (roll < arch.conveyP + arch.iceP + arch.trampP) return { kind: "trampoline", restitution: 1.1, friction: 0.3 };
+    return { kind: "ramp", ...RAMP };
+  };
+
+  const spawnX = W * pick(0.18, 0.82);
+  const spawn = { x: spawnX, y: 40 };
+  let dir: 1 | -1 = spawnX < W / 2 ? 1 : -1;
+
+  // First ramp: high end slightly behind the spawn so the drop lands near the top.
+  let highX = spawnX - dir * 40;
+  let highY = pick(100, 130);
+  let plannedTravel = highY;
+  let lipX = highX;
+  let lipY = highY;
+
+  for (let i = 0; i < arch.maxRamps; i++) {
+    const tilt = pick(arch.tilt[0], arch.tilt[1]);
+    let endX = highX + dir * W * pick(arch.rampLen[0], arch.rampLen[1]);
+    endX = Math.max(SIDE_MARGIN, Math.min(W - SIDE_MARGIN, endX));
+    const span = Math.abs(endX - highX);
+    if (span < 150) break;
+    const endY = highY + span * tilt;
+    if (endY > FLOOR_Y - 110) break;
+
+    const id = `ramp-${i}`;
+    // First ramp is always plain (v1 law: the boost pad assumes a predictable
+    // surface). Later ramps roll the archetype's variant odds. Conveyor belts
+    // always push downhill (a->b is high->low here).
+    const variant = i === 0 ? { kind: "ramp" as const, ...RAMP } : variantFor(rng());
+    const surf: Surface = {
+      id,
+      a: { x: highX, y: highY },
+      b: { x: endX, y: endY },
+      restitution: variant.restitution,
+      friction: variant.friction,
+      kind: variant.kind,
+    };
+    if (variant.kind === "conveyor") surf.belt = pick(240, 360);
+    surfaces.push(surf);
+    rampIds.push(id);
+
+    if (i === 0) {
+      // One gentle booster on the first ramp only — mid-run speed injection
+      // makes hop drift unpredictable (v1 law). Sits on the surface, pushing
+      // down the slope.
+      const t = pick(0.35, 0.6);
+      const sx = highX + (endX - highX) * t;
+      const sy = highY + (endY - highY) * t;
+      const segLen = Math.hypot(endX - highX, endY - highY);
+      const tx = (endX - highX) / segLen;
+      const ty = (endY - highY) / segLen;
+      const strength = pick(220, 340);
+      pads.push({
+        id: "pad-boost",
+        // On the surface point: radius 22 vs the ball center 10px above the
+        // surface guarantees the rolling ball enters the zone.
+        pos: { x: sx, y: sy },
+        radius: 22,
+        push: { x: tx * strength, y: ty * strength },
+      });
+    }
+
+    lipX = endX;
+    lipY = endY;
+    plannedTravel += span;
+
+    if (plannedTravel >= PLANNED_TRAVEL_TARGET && i >= 2) break;
+    if (i === arch.maxRamps - 1) break;
+
+    const hop = pick(arch.hop[0], arch.hop[1]);
+    const altitude = lipY + hop;
+    if (altitude > FLOOR_Y - 150) break;
+
+    // Probe the partial map: where does the ball actually come down a hop below
+    // this lip? The next ramp's high end goes CATCH_SLACK beyond that point.
+    const landing = findCrossing(probe(surfaces, bumpers, pads, spawn), lipX, dir, altitude);
+    if (!landing) break; // ball never makes it off this lip cleanly — validator's problem
+
+    let nextHighX = landing.x + dir * CATCH_SLACK;
+    nextHighX = Math.max(SIDE_MARGIN, Math.min(W - SIDE_MARGIN, nextHighX));
+    // The catch must reach back past the lip, or the band geometry is broken.
+    if ((nextHighX - lipX) * dir < 40) break;
+    highX = nextHighX;
+    highY = altitude;
+    plannedTravel += hop + Math.abs(landing.x - lipX);
+    dir = dir === 1 ? -1 : 1;
+  }
+
+  // ---- Finale ----
+  let basinFeedDir = dir;
+
+  if (arch.name !== "kicker") {
+    // v1 law: every map carries one guaranteed chaos element. Non-kicker maps
+    // put an ambient bumper on the final flight off the band, where the only
+    // thing downstream is the basin — which absorbs the kick. (Putting it in
+    // an early hop doesn't work here: the probe-built catches re-converge the
+    // kick perfectly and the perturbation spread collapses below the gate.)
+    const flight = probe(surfaces, bumpers, pads, spawn);
+    const triggerY = lipY + (FLOOR_Y - lipY) * pick(0.3, 0.45);
+    let pastLip = false;
+    for (const p of flight) {
+      if (!pastLip && (p.x - lipX) * dir > 2) pastLip = true;
+      if (pastLip && p.vy > 0 && p.y >= triggerY) {
+        if (p.x > SIDE_MARGIN + 30 && p.x < W - SIDE_MARGIN - 30) {
+          bumpers.push({
+            id: "bumper-ambient",
+            pos: { x: p.x, y: p.y + 34 }, // just under the path: a top graze, not a wall
+            radius: pickInt(22, 26),
+            kick: pick(620, 760),
+            maxHits: 3,
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  if (arch.name === "kicker" && rampIds.length >= 2) {
+    // First-light pattern: probe the flight off the last lip, put the bumper on
+    // the measured path at ball height, and hang a long return ramp beneath it.
+    const flight = probe(surfaces, bumpers, pads, spawn);
+    const bx = lipX + dir * 88;
+    let ballYAtBx: number | null = null;
+    let pastLip = false;
+    for (const p of flight) {
+      if (!pastLip && (p.x - lipX) * dir > 2) pastLip = true;
+      if (pastLip && (p.x - bx) * dir >= 0) {
+        ballYAtBx = p.y;
+        break;
+      }
+    }
+    if (ballYAtBx !== null && bx > SIDE_MARGIN && bx < W - SIDE_MARGIN) {
+      const radius = pickInt(24, 28);
+      bumpers.push({
+        id: "bumper-kick",
+        pos: { x: bx, y: ballYAtBx + 2 },
+        radius,
+        kick: pick(840, 980),
+        maxHits: 3,
+      });
+      const retTilt = pick(0.16, 0.19);
+      const retHighX = bx - dir * 40;
+      const retHighY = ballYAtBx + 42;
+      let retEndX = retHighX - dir * W * pick(0.45, 0.58);
+      retEndX = Math.max(SIDE_MARGIN, Math.min(W - SIDE_MARGIN, retEndX));
+      let retSpan = Math.abs(retEndX - retHighX);
+      // Shorten the span — never flatten the tilt — if the ramp would reach the
+      // floor. A near-flat return ramp is exactly the slow-ball trap the laws ban.
+      const maxSpan = (FLOOR_Y - 16 - retHighY) / retTilt;
+      if (retSpan > maxSpan) {
+        retSpan = maxSpan;
+        retEndX = retHighX - dir * retSpan;
+      }
+      const retEndY = retHighY + retSpan * retTilt;
+      surfaces.push({
+        id: "ramp-return",
+        a: { x: retEndX, y: retEndY },
+        b: { x: retHighX, y: retHighY },
+        ...RAMP,
+        kind: "ramp",
+      });
+      rampIds.push("ramp-return");
+      plannedTravel += retSpan;
+      basinFeedDir = (dir * -1) as 1 | -1;
+    }
+  }
+
+  // Basin: probe the now-complete structure to find where the ball first meets
+  // the floor, then build the basin around that point — near curb behind it,
+  // tall far lip ahead of the slide direction.
+  const finale = probe(surfaces, bumpers, pads, spawn);
+  let floorHit: ProbeSample | null = null;
+  for (const p of finale) {
+    if (p.y >= FLOOR_Y - 11) {
+      floorHit = p;
+      break;
+    }
+  }
+  if (floorHit) {
+    const slideDir: 1 | -1 = floorHit.vx >= 0 ? 1 : -1;
+    let farX = floorHit.x + slideDir * pick(220, 340);
+    farX = Math.max(26, Math.min(W - 26, farX));
+    let nearX = floorHit.x - slideDir * pick(80, 120);
+    nearX = Math.max(26, Math.min(W - 26, nearX));
+    surfaces.push({
+      id: "basin-lip-far",
+      a: { x: farX, y: FLOOR_Y },
+      b: { x: farX, y: FLOOR_Y - 72 },
+      restitution: 0.3,
+      friction: 0.2,
+      kind: "lip",
+    });
+    surfaces.push({
+      id: "basin-curb-near",
+      a: { x: nearX, y: FLOOR_Y },
+      b: { x: nearX, y: FLOOR_Y - 14 },
+      restitution: 0.3,
+      friction: 0.2,
+      kind: "lip",
+    });
+    plannedTravel += Math.abs(farX - floorHit.x) + (FLOOR_Y - lipY);
+  }
+  void basinFeedDir; // direction bookkeeping kept for future destination types
+
+  return {
+    map: { id: `gen-${seed}`, spawn, ballRadius: 10, surfaces, bumpers, pads },
+    archetype: arch.name,
+    plannedTravel,
+    rampIds,
+  };
+}
