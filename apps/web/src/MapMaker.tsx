@@ -5,7 +5,7 @@
 // export artifact.
 
 import { useCallback, useEffect, useState } from "react";
-import { buildMap, funScore, validate, type Validation } from "@gravguess/gen";
+import { buildMap, funScore, generateDaily, validate, type Validation } from "@gravguess/gen";
 import { TICK_RATE } from "@gravguess/sim";
 import { legendKeysFor } from "./Legend.tsx";
 import type { LoadedMap } from "./Game.tsx";
@@ -18,15 +18,33 @@ import {
 } from "./mapmaker.ts";
 
 interface Tested {
-  seed: string;
+  seed: string; // the EXACT seed that built this map (seedUsed after the reject loop)
   archetype: string;
   validation: Validation;
   funScore: number;
   loaded: LoadedMap;
   modifiers: string[];
+  attempts: number; // tries the reject loop needed (1 when loading an exact seed)
 }
 
-function testSeed(seed: string): Tested {
+// Preview a base seed exactly as the pipeline would: run the generate-and-reject
+// loop and surface the PASSING map it ships (not the raw first attempt, which
+// usually fails by design — rejection is the quality filter).
+function previewSeed(baseSeed: string): Tested {
+  const d = generateDaily(baseSeed);
+  return {
+    seed: d.seedUsed,
+    archetype: d.archetype,
+    validation: d.validation,
+    funScore: d.funScore,
+    attempts: d.attempts,
+    loaded: { map: d.map, label: `map maker · ${d.seedUsed} · ${d.archetype}`, daily: null },
+    modifiers: legendKeysFor(d.map),
+  };
+}
+
+// Rebuild one exact seed (no reject loop) — for replaying a saved map verbatim.
+function exactSeed(seed: string): Tested {
   const gen = buildMap(seed);
   const validation = validate(gen.map, gen.rampIds, gen.archetype);
   return {
@@ -34,6 +52,7 @@ function testSeed(seed: string): Tested {
     archetype: gen.archetype,
     validation,
     funScore: validation.pass ? funScore(validation) : 0,
+    attempts: 1,
     loaded: { map: gen.map, label: `map maker · ${seed} · ${gen.archetype}`, daily: null },
     modifiers: legendKeysFor(gen.map),
   };
@@ -61,7 +80,7 @@ export function MapMaker({
     }
     setTesting(true);
     const id = setTimeout(() => {
-      setTested(testSeed(seed));
+      setTested(previewSeed(seed));
       setTesting(false);
     }, 120);
     return () => clearTimeout(id);
@@ -116,9 +135,13 @@ export function MapMaker({
           {tested && m && (
             <div className={`maker-card ${tested.validation.pass ? "pass" : "fail"} ${testing ? "stale" : ""}`}>
               <div className="maker-verdict">
-                {tested.validation.pass ? "✓ Passes the bot" : "✗ Rejected"}
+                {tested.validation.pass ? "✓ Passes the bot" : "✗ No pass in 150 tries"}
                 <span className="maker-fun">fun {tested.funScore.toFixed(1)}</span>
               </div>
+              <p className="maker-seedused">
+                shipped seed <code>{tested.seed}</code>
+                {tested.attempts > 1 ? ` · found on try ${tested.attempts}` : ""}
+              </p>
               <ul className="maker-gates">
                 <Gate ok={m.settled} label={`settles (${(m.ticks / TICK_RATE).toFixed(1)}s)`} />
                 <Gate ok={m.travel >= 1.3 * 1280} label={`travel ${(m.travel / 1280).toFixed(2)}× width`} />
@@ -158,7 +181,7 @@ export function MapMaker({
                 <li key={s.id}>
                   <button
                     className="maker-load"
-                    onClick={() => onPlay(testSeed(s.seed).loaded)}
+                    onClick={() => onPlay(exactSeed(s.seed).loaded)}
                     title="Play this map"
                   >
                     <span className="maker-load-seed">{s.seed}</span>

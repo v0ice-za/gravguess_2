@@ -40,6 +40,8 @@ export function funScore(v: Validation): number {
   else if (v.spread >= 0.08) score += 1;
   score += Math.min(v.metrics.ticks / 120, 12) / 6; // up to +2 for run length
   if (v.metrics.bumperHits > 0) score += 1;
+  if (v.metrics.bumperHits >= 2) score += 1.5; // a pinball ricochet — the signature journey
+  if (v.metrics.tangibleModifiers >= 4) score += 1; // a busy, eventful map beats a sparse one
   if (v.metrics.maxAirTicks >= 48) score += 1; // a real flight moment (0.4s+)
   return score;
 }
@@ -59,15 +61,25 @@ function candidateAt(seed: string, attempt: number): DailyMap {
   };
 }
 
-/** First passing candidate — the fast path for practice maps and dev. */
-export function generateDaily(seed: string, maxAttempts = 150): DailyMap {
+/**
+ * Best-of passing candidate for a seed — used by practice maps and the Map Maker
+ * preview. Collects a handful of valid candidates and returns the most fun, so
+ * what you see matches the curation the daily publisher applies (it never ships
+ * the first map that merely limped through the gates).
+ */
+export function generateDaily(seed: string, maxAttempts = 150, collect = 6): DailyMap {
+  const survivors: DailyMap[] = [];
   let best: DailyMap | null = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts && survivors.length < collect; attempt++) {
     const candidate = candidateAt(seed, attempt);
-    if (candidate.validation.pass) return candidate;
-    if (!best || candidate.validation.failures.length < best.validation.failures.length) {
+    if (candidate.validation.pass) survivors.push(candidate);
+    else if (!best || candidate.validation.failures.length < best.validation.failures.length) {
       best = candidate;
     }
+  }
+  if (survivors.length > 0) {
+    survivors.sort((a, b) => b.funScore - a.funScore);
+    return survivors[0]!;
   }
   // Nothing passed: ship the closest candidate, reporting the full attempt spend.
   return { ...best!, attempts: maxAttempts };

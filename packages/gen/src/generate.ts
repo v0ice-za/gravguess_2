@@ -245,27 +245,36 @@ export function buildMap(seed: string): GeneratedMap {
 
   if (arch.name !== "kicker") {
     // v1 law: every map carries one guaranteed chaos element. Non-kicker maps
-    // put an ambient bumper on the final flight off the band, where the only
-    // thing downstream is the basin — which absorbs the kick. (Putting it in
-    // an early hop doesn't work here: the probe-built catches re-converge the
-    // kick perfectly and the perturbation spread collapses below the gate.)
-    const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos);
-    const triggerY = lipY + (FLOOR_Y - lipY) * pick(0.3, 0.45);
-    let pastLip = false;
-    for (const p of flight) {
-      if (!pastLip && (p.x - lipX) * dir > 2) pastLip = true;
-      if (pastLip && p.vy > 0 && p.y >= triggerY) {
-        if (p.x > SIDE_MARGIN + 30 && p.x < W - SIDE_MARGIN - 30) {
+    // put bumpers on the final flight off the band, where the only thing
+    // downstream is the basin — which absorbs the kick. (Putting them in an
+    // early hop doesn't work: the probe-built catches re-converge the kick
+    // perfectly and the perturbation spread collapses below the gate.)
+    //
+    // Re-probe before each placement so a second bumper sits on the ACTUAL
+    // post-kick path — that turns the finale into a genuine pinball ricochet
+    // (ping off one, fall, ping off the next) instead of a single bounce.
+    const placeOnFlight = (id: string, minY: number, kickLo: number, kickHi: number): number | null => {
+      const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      let pastLip = false;
+      for (const p of flight) {
+        if (!pastLip && (p.x - lipX) * dir > 2) pastLip = true;
+        if (pastLip && p.vy > 0 && p.y >= minY && p.x > SIDE_MARGIN + 30 && p.x < W - SIDE_MARGIN - 30) {
           bumpers.push({
-            id: "bumper-ambient",
+            id,
             pos: { x: p.x, y: p.y + 34 }, // just under the path: a top graze, not a wall
             radius: pickInt(22, 26),
-            kick: pick(620, 760),
+            kick: pick(kickLo, kickHi),
             maxHits: 3,
           });
+          return p.y;
         }
-        break;
       }
+      return null;
+    };
+    const firstY = placeOnFlight("bumper-ambient", lipY + (FLOOR_Y - lipY) * pick(0.3, 0.45), 620, 760);
+    // ~55% of the time, a softer second bumper lower down for the ricochet.
+    if (firstY !== null && firstY < FLOOR_Y - 150 && rng() < 0.55) {
+      placeOnFlight("bumper-pinball", firstY + pick(70, 120), 480, 640);
     }
   }
 

@@ -312,6 +312,17 @@ button.ghost {
   letter-spacing: 0.08em;
 }
 
+.maker-seedused {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.maker-seedused code {
+  color: #67e8f9;
+  font-family: ui-monospace, monospace;
+}
+
 .maker-card {
   margin-top: 4px;
   border: 1px solid #334155;
