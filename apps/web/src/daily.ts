@@ -79,24 +79,45 @@ export function savePlayed(rec: PlayedRecord): Streak {
   return streak;
 }
 
-function distanceEmoji(ballWidths: number): string {
-  if (ballWidths <= 1) return "\u{1F3AF}"; // direct hit
-  if (ballWidths <= 3) return "\u{1F7E2}";
-  if (ballWidths <= 8) return "\u{1F7E1}";
-  if (ballWidths <= 15) return "\u{1F7E0}";
-  return "\u{1F534}";
+export interface FeedbackTier {
+  label: string;
+  badge: string;
+  color: string;
+}
+
+/** v1's feedback tiers — accuracy in 0..100. */
+export function getFeedbackTier(accuracy: number): FeedbackTier {
+  if (accuracy >= 99) return { label: "Perfect", badge: "\u{1F3AF}", color: "#4ade80" };
+  if (accuracy >= 95) return { label: "Insane", badge: "\u{1F7E2}", color: "#4ade80" };
+  if (accuracy >= 85) return { label: "Great", badge: "\u{1F7E2}", color: "#4ade80" };
+  if (accuracy >= 70) return { label: "Solid", badge: "\u{1F7E1}", color: "#facc15" };
+  if (accuracy >= 50) return { label: "Rough", badge: "\u{1F7E0}", color: "#fb923c" };
+  return { label: "Miss", badge: "\u{26AA}", color: "#e5e7eb" };
+}
+
+/**
+ * A 10-cell proximity meter — the Wordle-grid equivalent. Friends can compare
+ * two shares at a glance without any numbers: more green = closer guess. Closer
+ * than a ball-width fills the whole bar; ~10+ ball-widths off empties it.
+ */
+export function proximityMeter(ballWidths: number): string {
+  const filled = Math.max(0, Math.min(10, Math.round(10 - ballWidths)));
+  return "\u{1F7E9}".repeat(filled) + "\u{2B1C}".repeat(10 - filled);
 }
 
 /** Spoiler-free share text — no coordinates, no map details. */
-export function buildShareText(rec: PlayedRecord, streak: Streak): string {
+export function buildShareText(rec: PlayedRecord, streak: Streak, url?: string): string {
+  const tier = getFeedbackTier(rec.accuracy * 100);
   const lines = [
-    `GravGuess ${rec.date}`,
-    `${distanceEmoji(rec.ballWidths)} ${rec.ballWidths.toFixed(1)} ball-widths · ${(rec.accuracy * 100).toFixed(1)}%`,
+    `GravGuess ${rec.date} ${tier.badge}`,
+    `${tier.label} — ${rec.ballWidths.toFixed(1)} ball-widths · ${(rec.accuracy * 100).toFixed(1)}%`,
+    proximityMeter(rec.ballWidths),
   ];
   const extras: string[] = [];
   if (rec.beatPar) extras.push("⛳ under par!");
   if (streak.count > 1) extras.push(`\u{1F525} ${streak.count}-day streak`);
   if (extras.length) lines.push(extras.join(" · "));
+  if (url) lines.push(url);
   return lines.join("\n");
 }
 

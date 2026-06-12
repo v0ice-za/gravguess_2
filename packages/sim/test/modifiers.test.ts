@@ -64,6 +64,63 @@ describe("modifiers", () => {
     expect(r.landing.y).toBeCloseTo(590, 0);
   });
 
+  it("a turbo ring multiplies speed once and preserves direction", () => {
+    const world = (turbos: MapDef["turbos"]): MapDef =>
+      base({
+        spawn: { x: 200, y: 80 },
+        surfaces: [
+          { id: "ground", a: { x: 0, y: 600 }, b: { x: 1280, y: 600 }, restitution: 0.1, friction: 2.0, kind: "basin" },
+        ],
+        turbos,
+      });
+    const plain = simulate(world([]));
+    const boosted = simulate(world([{ id: "turbo-1", pos: { x: 200, y: 300 }, radius: 26, mult: 1.8 }]));
+    // A pure vertical fall through the ring speeds up the descent (settles sooner).
+    expect(boosted.ticks).toBeLessThan(plain.ticks);
+    const fires = boosted.events.filter((e) => e.type === "turbo");
+    expect(fires.length).toBe(1);
+  });
+
+  it("a teleporter warps the ball across the map, velocity preserved", () => {
+    const r = simulate(
+      base({
+        spawn: { x: 200, y: 80 },
+        surfaces: [
+          { id: "ground", a: { x: 0, y: 600 }, b: { x: 1280, y: 600 }, restitution: 0.1, friction: 2.0, kind: "basin" },
+        ],
+        teleporters: [{ id: "tp-1", a: { x: 200, y: 300 }, b: { x: 1000, y: 300 }, radius: 26 }],
+      }),
+    );
+    expect(r.events.some((e) => e.type === "teleport")).toBe(true);
+    // Dropped at x=200 but warped to x≈1000, so it must land on the far side.
+    expect(r.landing.x).toBeGreaterThan(900);
+  });
+
+  it("wind curves a fall sideways", () => {
+    const noWind = simulate(
+      base({ spawn: { x: 640, y: 60 }, surfaces: [{ id: "ground", a: { x: 0, y: 600 }, b: { x: 1280, y: 600 }, restitution: 0.1, friction: 2.0, kind: "basin" }] }),
+    );
+    const windy = simulate(
+      base({ spawn: { x: 640, y: 60 }, wind: 100, surfaces: [{ id: "ground", a: { x: 0, y: 600 }, b: { x: 1280, y: 600 }, restitution: 0.1, friction: 2.0, kind: "basin" }] }),
+    );
+    expect(windy.landing.x).toBeGreaterThan(noWind.landing.x + 20);
+  });
+
+  it("a lift field slows a fall while its budget lasts", () => {
+    const plain = simulate(
+      base({ spawn: { x: 400, y: 60 }, surfaces: [{ id: "ground", a: { x: 0, y: 600 }, b: { x: 1280, y: 600 }, restitution: 0.1, friction: 2.0, kind: "basin" }] }),
+    );
+    const lifted = simulate(
+      base({
+        spawn: { x: 400, y: 60 },
+        surfaces: [{ id: "ground", a: { x: 0, y: 600 }, b: { x: 1280, y: 600 }, restitution: 0.1, friction: 2.0, kind: "basin" }],
+        fields: [{ id: "lift-1", kind: "lift", pos: { x: 400, y: 300 }, halfW: 120, halfH: 220, strength: 3600 }],
+      }),
+    );
+    // The upward push delays the landing.
+    expect(lifted.ticks).toBeGreaterThan(plain.ticks);
+  });
+
   it("a boost pad fires exactly once and is recorded as touched", () => {
     const r = simulate(
       base({

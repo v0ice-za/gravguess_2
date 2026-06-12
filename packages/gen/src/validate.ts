@@ -28,6 +28,13 @@ const MIN_HORIZONTAL_RANGE = 0.45;
 const MIN_VERTICAL_RANGE = 0.6;
 const MIN_REVERSALS = 3;
 const MIN_RAMP_TOUCHES = 3;
+// The interest guarantee: every shipped map must put the ball through at least
+// this many DISTINCT modifiers that measurably changed its motion — a fired
+// pad, a live bumper kick, a variant surface (ice/trampoline/conveyor) it rode,
+// a turbo ring, a teleport. Plain ramps/walls/basins never count. A map that
+// can't clear this is rejected, so "randomly generated" never means "boring".
+const MIN_TANGIBLE_MODIFIERS = 3;
+const VARIANT_KINDS = new Set(["ice", "trampoline", "conveyor"]);
 const LANDING_MARGIN = 0.05; // landing must be in the central 90% of width
 const MIN_SPREAD_RATIO = 0.03; // perturbation spread: skill-readable…
 const MAX_SPREAD_RATIO = 0.55; // …but not unreadable luck
@@ -46,7 +53,15 @@ export interface RunMetrics {
   bumperHits: number;
   maxAirTicks: number;
   lateDrama: boolean; // reversal or bumper hit in the final 25% of the run
+  /** Count of DISTINCT modifiers that measurably acted on the ball. */
+  tangibleModifiers: number;
+  /** Human-readable kinds of those modifiers (for the maker report). */
+  modifierKinds: string[];
+  /** Ids of force fields the ball dwelt in long enough to be deflected. */
+  dweltFieldIds: string[];
 }
+
+const FIELD_DWELL_TICKS = 6; // ticks inside a field that count as a real deflection
 
 export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
   const s = createRun(map, spawn);
@@ -60,11 +75,23 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
   let maxAirTicks = 0;
   const dramaTicks: number[] = [];
 
+  // Distinct modifiers that measurably acted on the ball.
+  const firedPads = new Set<string>();
+  const liveBumpers = new Set<string>();
+  const turboFires = new Set<string>();
+  const teleports = new Set<string>();
+  const fields = map.fields ?? [];
+  const fieldDwell = fields.map(() => 0);
+
   let prevX = s.px;
   let prevY = s.py;
   while (!s.done) {
     const events = step(s);
     travel += Math.sqrt((s.px - prevX) * (s.px - prevX) + (s.py - prevY) * (s.py - prevY));
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i]!;
+      if (Math.abs(s.px - f.pos.x) <= f.halfW && Math.abs(s.py - f.pos.y) <= f.halfH) fieldDwell[i]!++;
+    }
     prevX = s.px;
     prevY = s.py;
     if (s.px < minX) minX = s.px;
@@ -77,12 +104,50 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
         dramaTicks.push(e.tick);
       } else if (e.type === "bumper" && e.live) {
         bumperHits++;
+        liveBumpers.add(e.bumperId);
         dramaTicks.push(e.tick);
       } else if (e.type === "air" && e.ticks > maxAirTicks) {
         maxAirTicks = e.ticks;
+      } else if (e.type === "pad") {
+        firedPads.add(e.padId);
+      } else if (e.type === "turbo") {
+        turboFires.add(e.turboId);
+      } else if (e.type === "teleport") {
+        teleports.add(e.teleporterId);
       }
     }
   }
+
+  // Variant traversal surfaces the ball actually rode (sliding/bouncing/carried
+  // IS the effect, so any contact counts).
+  const variantSurfaces = new Set<string>();
+  for (const surf of map.surfaces) {
+    if (VARIANT_KINDS.has(surf.kind) && s.touched.has(surf.id)) variantSurfaces.add(surf.kind);
+  }
+
+  const dweltFieldIds: string[] = [];
+  const dweltFieldKinds = new Set<string>();
+  for (let i = 0; i < fields.length; i++) {
+    if (fieldDwell[i]! >= FIELD_DWELL_TICKS) {
+      dweltFieldIds.push(fields[i]!.id);
+      dweltFieldKinds.add(fields[i]!.kind);
+    }
+  }
+
+  const modifierKinds: string[] = [];
+  if (firedPads.size > 0) modifierKinds.push("boost pad");
+  if (liveBumpers.size > 0) modifierKinds.push("bumper");
+  for (const k of variantSurfaces) modifierKinds.push(k);
+  if (turboFires.size > 0) modifierKinds.push("turbo");
+  if (teleports.size > 0) modifierKinds.push("teleporter");
+  for (const k of dweltFieldKinds) modifierKinds.push(k);
+  const tangibleModifiers =
+    firedPads.size +
+    liveBumpers.size +
+    variantSurfaces.size +
+    turboFires.size +
+    teleports.size +
+    dweltFieldKinds.size;
 
   const settled = s.events[s.events.length - 1]?.type === "settle";
   return {
@@ -97,6 +162,9 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
     bumperHits,
     maxAirTicks,
     lateDrama: dramaTicks.some((t) => t > s.tick * 0.75),
+    tangibleModifiers,
+    modifierKinds,
+    dweltFieldIds,
   };
 }
 
@@ -137,11 +205,25 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   if (rampTouches < requiredRamps) {
     failures.push(`ramp touches ${rampTouches}/${rampIds.length} < ${requiredRamps}`);
   }
+  if (base.tangibleModifiers < MIN_TANGIBLE_MODIFIERS) {
+    failures.push(
+      `only ${base.tangibleModifiers} tangible modifier(s) [${base.modifierKinds.join(", ") || "none"}] < ${MIN_TANGIBLE_MODIFIERS}`,
+    );
+  }
   for (const b of map.bumpers) {
     if (!base.touched.has(b.id)) failures.push(`bumper ${b.id} never touched`);
   }
   for (const p of map.pads ?? []) {
     if (!base.touched.has(p.id)) failures.push(`pad ${p.id} never touched`);
+  }
+  for (const tr of map.turbos ?? []) {
+    if (!base.touched.has(tr.id)) failures.push(`turbo ${tr.id} never touched`);
+  }
+  for (const tp of map.teleporters ?? []) {
+    if (!base.touched.has(tp.id)) failures.push(`teleporter ${tp.id} never entered`);
+  }
+  for (const f of map.fields ?? []) {
+    if (!base.dweltFieldIds.includes(f.id)) failures.push(`field ${f.id} (${f.kind}) never entered`);
   }
   if (base.landing.x < W * LANDING_MARGIN || base.landing.x > W * (1 - LANDING_MARGIN)) {
     failures.push(`landing x=${base.landing.x.toFixed(0)} outside central ${(1 - 2 * LANDING_MARGIN) * 100}%`);

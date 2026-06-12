@@ -41,13 +41,31 @@ function median(xs: number[]): number {
   return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
+// Par above this fraction of width reads as luck, not skill: the perturbed
+// landings split into far-apart clusters, so even a perfect read can miss by a
+// quarter-screen. Prefer survivors under the cap; fall back to the lowest par.
+const PAR_CAP_RATIO = 0.25;
+
+/** Par for a survivor, measured against its own base-run landing. */
+function survivorPar(d: DailyMap): number {
+  const ref = d.validation.metrics.landing;
+  const par = median(d.validation.landings.map((l) => Math.hypot(l.x - ref.x, l.y - ref.y)));
+  return Math.max(par, d.map.ballRadius * 2);
+}
+
 /**
  * Pick the day's map from ranked survivors, avoiding a repeat of yesterday's
  * fingerprint (two near-identical days reads as "the game ran out of content").
  */
 export function buildDaily(date: string, previous?: Fingerprint | undefined): DailyPayload | null {
-  const survivors = generateRanked(date);
-  if (survivors.length === 0) return null;
+  const all = generateRanked(date);
+  if (all.length === 0) return null;
+
+  // Drop "luck" maps (par above the cap). If every survivor is over the cap,
+  // keep them all and let the lowest-par one win below rather than publish
+  // nothing — but prefer the readable ones whenever they exist.
+  const underCap = all.filter((s) => survivorPar(s) <= PAR_CAP_RATIO * 1280);
+  const survivors = underCap.length > 0 ? underCap : all;
 
   // Freshness beats fun score: a slightly less spectacular map that FEELS new
   // is worth more to a daily ritual than the same archetype two days running.
@@ -58,6 +76,10 @@ export function buildDaily(date: string, previous?: Fingerprint | undefined): Da
       (s) => fingerprint(s).landingThird !== previous.landingThird,
     );
     chosen = newArchetype ?? newRegion ?? chosen;
+  }
+  // If we had to fall back to over-cap maps, pick the most readable one.
+  if (underCap.length === 0) {
+    chosen = [...all].sort((a, b) => survivorPar(a) - survivorPar(b))[0]!;
   }
 
   // The authoritative run, recorded at publish time.

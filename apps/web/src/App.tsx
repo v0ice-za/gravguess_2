@@ -5,10 +5,11 @@ import { useCallback, useEffect, useState } from "react";
 import { firstLight } from "@gravguess/sim";
 import { generateDaily } from "@gravguess/gen";
 import { Game, type LoadedMap } from "./Game.tsx";
+import { MapMaker } from "./MapMaker.tsx";
 import { Tutorial } from "./Tutorial.tsx";
 import { fetchDaily, loadPlayed, loadStreak, todayUTC, type PlayedRecord } from "./daily.ts";
 
-type Screen = "menu" | "game";
+type Screen = "menu" | "game" | "mapmaker";
 
 const TUTORIAL_SEEN_KEY = "gg2:tutorial-seen";
 
@@ -33,6 +34,9 @@ export function App() {
   const streak = loadStreak();
   const today = todayUTC();
   const playedToday = loadPlayed(today);
+  // The Map Maker is an admin/authoring tool, not a player feature yet. It is
+  // reachable only with ?admin in the URL until the generation is locked in.
+  const isAdmin = new URLSearchParams(window.location.search).has("admin");
 
   // Deep link: ?seed=... goes straight into practice.
   useEffect(() => {
@@ -83,10 +87,24 @@ export function App() {
     }
   }, []);
 
+  // Map Maker "Play" routes a candidate into the game in practice mode. "Back"
+  // from that game returns to the maker, not the menu.
+  const playFromMaker = useCallback((map: LoadedMap) => {
+    setLoaded(map);
+    setInitialRecord(null);
+    setScreen("game");
+  }, []);
+
+  if (screen === "mapmaker" && isAdmin) {
+    return <MapMaker onPlay={playFromMaker} onBack={backToMenu} />;
+  }
+
   if (screen === "game" && loaded) {
+    // Maker test-plays return to the maker; daily and practice games go to the menu.
+    const onBack = loaded.label.startsWith("map maker") ? () => setScreen("mapmaker") : backToMenu;
     return (
       <>
-        <Game loaded={loaded} initialRecord={initialRecord} onBack={backToMenu} />
+        <Game loaded={loaded} initialRecord={initialRecord} onBack={onBack} />
         {showTutorial && <Tutorial onClose={() => setShowTutorial(false)} />}
       </>
     );
@@ -94,31 +112,41 @@ export function App() {
 
   return (
     <div className="menu-screen">
-      <h1 className="menu-logo">
-        Grav<span className="accent">Guess</span>
-      </h1>
-      <p className="menu-copy">
-        One physics puzzle a day. Study the map, call the landing, watch the run.
-      </p>
-      {(streak.count > 0 || playedToday) && (
-        <p className="menu-status">
-          {playedToday
-            ? `Played today: ${playedToday.ballWidths.toFixed(1)} ball-widths (${(playedToday.accuracy * 100).toFixed(1)}%)`
-            : null}
-          {playedToday && streak.count > 1 ? " · " : null}
-          {streak.count > 1 ? `🔥 ${streak.count}-day streak` : null}
+      <div className="menu-card">
+        <div className="menu-banner">
+          <h1 className="menu-logo">
+            GRAV<span className="accent">GUESS</span>
+          </h1>
+          <p className="menu-tagline">PREDICT · FALL · COMPETE</p>
+        </div>
+        <h2 className="menu-heading">Choose how you want to play</h2>
+        <p className="menu-copy">
+          One physics puzzle a day. Study the map, call the landing, watch the run.
         </p>
-      )}
-      <div className="menu-grid">
-        <button onClick={playDaily} disabled={busy || dailyState === "missing"}>
-          {playedToday ? "Today's result" : "Play today's map"}
-          {dailyState === "missing" ? " (not published)" : ""}
-        </button>
-        <button onClick={playPractice}>Practice map</button>
-        <button onClick={() => setShowTutorial(true)}>How to play</button>
-        <button disabled title="Returning from v1 soon">
-          Map maker
-        </button>
+        {(streak.count > 0 || playedToday) && (
+          <p className="menu-status">
+            {playedToday
+              ? `Played today: ${playedToday.ballWidths.toFixed(1)} ball-widths (${(playedToday.accuracy * 100).toFixed(1)}%)`
+              : null}
+            {playedToday && streak.count > 1 ? " · " : null}
+            {streak.count > 1 ? `🔥 ${streak.count}-day streak` : null}
+          </p>
+        )}
+        <div className="menu-buttons">
+          <button
+            className="primary"
+            onClick={playDaily}
+            disabled={busy || dailyState === "missing"}
+          >
+            {playedToday ? "Today's result" : "Play today's map"}
+            {dailyState === "missing" ? " (not published)" : ""}
+          </button>
+          <button onClick={playPractice}>Practice map</button>
+          <button onClick={() => setShowTutorial(true)}>How to play</button>
+          {isAdmin && (
+            <button onClick={() => setScreen("mapmaker")}>Map maker (admin)</button>
+          )}
+        </div>
       </div>
       {showTutorial && <Tutorial onClose={() => setShowTutorial(false)} />}
     </div>

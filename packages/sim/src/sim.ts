@@ -35,6 +35,9 @@ const ROLLING_K = 50; // constant rolling deceleration = friction * ROLLING_K (p
 // applying it to rolling contact would pin balls on ramps (v1's classic trap).
 const IMPACT_FRICTION_MIN = 100; // px/s of normal speed before impact friction kicks in
 const IMPACT_FRICTION_MAX_MU = 0.5; // cap: high-friction floors still allow a landing slide
+const FAN_VX_CAP = 520; // px/s — a fan never accelerates horizontal speed past this
+const LIFT_BUDGET_TICKS = 240; // a lift field can only hold the ball up for 2s per drop
+const TELEPORT_COOLDOWN_TICKS = 45; // re-entry lockout after a warp (per teleporter)
 
 export interface RunState {
   map: MapDef;
@@ -49,6 +52,9 @@ export interface RunState {
   bumperHits: number[];
   bumperCooldown: number[];
   padUsed: boolean[];
+  turboUsed: boolean[];
+  teleCooldown: number[];
+  liftBudget: number[];
   /** Element ids the ball has contacted at least once (any contact, not just impacts). */
   touched: Set<string>;
   hash: HashState;
@@ -71,6 +77,9 @@ export function createRun(map: MapDef, spawnOverride?: Vec2): RunState {
     bumperHits: map.bumpers.map(() => 0),
     bumperCooldown: map.bumpers.map(() => 0),
     padUsed: (map.pads ?? []).map(() => false),
+    turboUsed: (map.turbos ?? []).map(() => false),
+    teleCooldown: (map.teleporters ?? []).map(() => 0),
+    liftBudget: (map.fields ?? []).map(() => LIFT_BUDGET_TICKS),
     touched: new Set(),
     hash: createHash(),
     events: [],
@@ -90,6 +99,53 @@ export function step(s: RunState): SimEvent[] {
 
   // Integrate (semi-implicit Euler).
   s.vy += GRAVITY * DT;
+
+  // Wind: a small constant horizontal acceleration. Gated so wind-free maps are
+  // byte-identical (the golden digest must not move).
+  if (s.map.wind !== undefined && s.map.wind !== 0) {
+    s.vx += s.map.wind * DT;
+  }
+
+  // Force fields: continuous acceleration while the ball is inside a region.
+  const fields = s.map.fields;
+  if (fields) {
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i]!;
+      const dx = s.px - f.pos.x;
+      const dy = s.py - f.pos.y;
+      const inX = dx < 0 ? -dx : dx;
+      const inY = dy < 0 ? -dy : dy;
+      if (inX > f.halfW || inY > f.halfH) continue;
+      if (f.kind === "fan") {
+        const dir = f.dir;
+        const ux = dir ? dir.x : 1;
+        const uy = dir ? dir.y : 0;
+        // Don't drive horizontal speed past the cap in the push direction.
+        const along = s.vx * ux + s.vy * uy;
+        if (along < FAN_VX_CAP) {
+          s.vx += ux * f.strength * DT;
+          s.vy += uy * f.strength * DT;
+        }
+      } else if (f.kind === "lift") {
+        if (s.liftBudget[i]! > 0) {
+          s.vy -= f.strength * DT;
+          s.liftBudget[i]!--;
+        }
+      } else {
+        // magnet: pull toward the center, falling off linearly to zero at the
+        // region corner (use the larger half-extent as the falloff radius).
+        const reach = f.halfW > f.halfH ? f.halfW : f.halfH;
+        const dist = len(dx, dy);
+        if (dist > 0 && dist < reach) {
+          const falloff = (reach - dist) / reach;
+          const a = f.strength * falloff * DT;
+          s.vx -= (dx / dist) * a;
+          s.vy -= (dy / dist) * a;
+        }
+      }
+    }
+  }
+
   const speedNow = len(s.vx, s.vy);
   if (speedNow > MAX_SPEED) {
     const k = MAX_SPEED / speedNow;
@@ -266,6 +322,56 @@ export function step(s: RunState): SimEvent[] {
       emit({ tick: s.tick, type: "touch", id: p.id, kind: "pad" });
       emit({ tick: s.tick, type: "pad", padId: p.id });
     }
+  }
+
+  // --- Turbo rings: one-shot speed multiplier on entry (direction preserved) ---
+  const turbos = s.map.turbos;
+  if (turbos) {
+    for (let i = 0; i < turbos.length; i++) {
+      if (s.turboUsed[i]!) continue;
+      const tr = turbos[i]!;
+      const dx = s.px - tr.pos.x;
+      const dy = s.py - tr.pos.y;
+      const reach = tr.radius + s.map.ballRadius;
+      if (dx * dx + dy * dy > reach * reach) continue;
+      s.turboUsed[i] = true;
+      s.vx *= tr.mult;
+      s.vy *= tr.mult;
+      s.touched.add(tr.id);
+      emit({ tick: s.tick, type: "touch", id: tr.id, kind: "pad" });
+      emit({ tick: s.tick, type: "turbo", turboId: tr.id });
+    }
+  }
+
+  // --- Teleporters: warp from entrance to exit, velocity preserved, cooldown ---
+  const teleporters = s.map.teleporters;
+  if (teleporters) {
+    for (let i = 0; i < teleporters.length; i++) {
+      if (s.teleCooldown[i]! > 0) continue;
+      const tp = teleporters[i]!;
+      const dx = s.px - tp.a.x;
+      const dy = s.py - tp.a.y;
+      const reach = tp.radius + s.map.ballRadius;
+      if (dx * dx + dy * dy > reach * reach) continue;
+      // Reappear at the exit, nudged along the travel direction so the ball
+      // clears the exit disc before the cooldown lifts.
+      const sp = len(s.vx, s.vy);
+      const nudge = tp.radius + s.map.ballRadius + 2;
+      if (sp > 0) {
+        s.px = tp.b.x + (s.vx / sp) * nudge;
+        s.py = tp.b.y + (s.vy / sp) * nudge;
+      } else {
+        s.px = tp.b.x;
+        s.py = tp.b.y;
+      }
+      s.teleCooldown[i] = TELEPORT_COOLDOWN_TICKS;
+      s.touched.add(tp.id);
+      emit({ tick: s.tick, type: "touch", id: tp.id, kind: "pad" });
+      emit({ tick: s.tick, type: "teleport", teleporterId: tp.id });
+    }
+  }
+  for (let i = 0; i < s.teleCooldown.length; i++) {
+    if (s.teleCooldown[i]! > 0) s.teleCooldown[i]!--;
   }
 
   // Safety clamp: the map should enclose the ball, but never let it escape the world.

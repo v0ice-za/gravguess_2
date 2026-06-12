@@ -20,8 +20,10 @@ import {
   step,
   type BoostPad,
   type Bumper,
+  type ForceField,
   type MapDef,
   type Surface,
+  type TurboRing,
   type Vec2,
 } from "@gravguess/sim";
 
@@ -83,8 +85,14 @@ function probe(
   bumpers: Bumper[],
   pads: BoostPad[],
   spawn: Vec2,
+  wind?: number,
+  turbos?: TurboRing[],
+  fields?: ForceField[],
 ): ProbeSample[] {
   const map: MapDef = { id: "probe", spawn, ballRadius: 10, surfaces, bumpers, pads };
+  if (wind !== undefined) map.wind = wind;
+  if (turbos && turbos.length > 0) map.turbos = turbos;
+  if (fields && fields.length > 0) map.fields = fields;
   const s = createRun(map);
   const samples: ProbeSample[] = [];
   while (!s.done) {
@@ -117,6 +125,17 @@ export function buildMap(seed: string): GeneratedMap {
   const pick = (lo: number, hi: number) => lo + rng() * (hi - lo);
   const pickInt = (lo: number, hi: number) => lo + Math.floor(rng() * (hi - lo + 1));
   const arch = ARCHETYPES[Math.floor(rng() * ARCHETYPES.length)]!;
+
+  // Wind decided up front so EVERY construction probe accounts for it — the
+  // catch ramps are built for the windy trajectory, not retrofitted. Kept well
+  // under 5% of gravity (2200) so it nudges flight without dominating it.
+  // Roll order is fixed here to keep seeds reproducible as features are added.
+  const windRoll = rng();
+  const windDir = rng() < 0.5 ? -1 : 1;
+  const windMag = pick(45, 95);
+  const wind = windRoll < 0.28 ? windDir * windMag : undefined;
+  const turbos: TurboRing[] = [];
+  const fields: ForceField[] = [];
 
   const surfaces: Surface[] = [
     { id: "wall-left", a: { x: 12, y: 0 }, b: { x: 12, y: H }, restitution: 0.4, friction: 0.1, kind: "wall" },
@@ -208,7 +227,7 @@ export function buildMap(seed: string): GeneratedMap {
 
     // Probe the partial map: where does the ball actually come down a hop below
     // this lip? The next ramp's high end goes CATCH_SLACK beyond that point.
-    const landing = findCrossing(probe(surfaces, bumpers, pads, spawn), lipX, dir, altitude);
+    const landing = findCrossing(probe(surfaces, bumpers, pads, spawn, wind, turbos), lipX, dir, altitude);
     if (!landing) break; // ball never makes it off this lip cleanly — validator's problem
 
     let nextHighX = landing.x + dir * CATCH_SLACK;
@@ -230,7 +249,7 @@ export function buildMap(seed: string): GeneratedMap {
     // thing downstream is the basin — which absorbs the kick. (Putting it in
     // an early hop doesn't work here: the probe-built catches re-converge the
     // kick perfectly and the perturbation spread collapses below the gate.)
-    const flight = probe(surfaces, bumpers, pads, spawn);
+    const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos);
     const triggerY = lipY + (FLOOR_Y - lipY) * pick(0.3, 0.45);
     let pastLip = false;
     for (const p of flight) {
@@ -253,7 +272,7 @@ export function buildMap(seed: string): GeneratedMap {
   if (arch.name === "kicker" && rampIds.length >= 2) {
     // First-light pattern: probe the flight off the last lip, put the bumper on
     // the measured path at ball height, and hang a long return ramp beneath it.
-    const flight = probe(surfaces, bumpers, pads, spawn);
+    const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos);
     const bx = lipX + dir * 88;
     let ballYAtBx: number | null = null;
     let pastLip = false;
@@ -300,10 +319,72 @@ export function buildMap(seed: string): GeneratedMap {
     }
   }
 
+  // Wildcard force field: a deflection (fan) or loft (lift) on the ball's flight.
+  // This is the main difficulty lever — it forces the player to JUDGE a push
+  // instead of tracing a fixed path, while staying fair (the zone + arrow are
+  // visible). Placed on the field-free measured path so the touch gate clears;
+  // the basin re-probes afterward so it adapts to the deflected trajectory.
+  if (rng() < 0.34) {
+    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos);
+    for (let k = Math.floor(path.length * 0.28); k < Math.floor(path.length * 0.6); k++) {
+      const p = path[k]!;
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      // Want a real flight moment (descending, in open air, clear of walls/floor).
+      if (speed > 220 && p.vy > 60 && p.x > SIDE_MARGIN + 130 && p.x < W - SIDE_MARGIN - 130 && p.y > 120 && p.y < FLOOR_Y - 170) {
+        if (rng() < 0.62) {
+          // Fan: push toward mid-screen so the ball can't sail straight off the edge.
+          const fdir: 1 | -1 = p.x < W / 2 ? 1 : -1;
+          fields.push({
+            id: "field-0",
+            kind: "fan",
+            pos: { x: p.x, y: p.y },
+            halfW: 100,
+            halfH: 120,
+            strength: pick(950, 1500),
+            dir: { x: fdir, y: 0 },
+          });
+        } else {
+          fields.push({
+            id: "field-0",
+            kind: "lift",
+            pos: { x: p.x, y: p.y + 40 },
+            halfW: 110,
+            halfH: 150,
+            strength: pick(1700, 2300),
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  // Variety guarantee: every map must carry at least one tangible modifier
+  // beyond the always-present pad + bumper, so the validator's tangible-modifier
+  // gate (>=3) reliably clears. A rolled variant surface, a placed field, or a
+  // turbo all qualify; if none landed, we MUST force a turbo ring.
+  const VARIANT_KINDS = new Set(["ice", "trampoline", "conveyor"]);
+  const hasVariant = surfaces.some((s) => VARIANT_KINDS.has(s.kind) && rampIds.includes(s.id));
+  const hasExtra = hasVariant || fields.length > 0;
+  const wantTurbo = !hasExtra || rng() < 0.3;
+  if (wantTurbo) {
+    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+    // Open-air point with real speed in the mid-run. When the turbo is the
+    // GUARANTEED third modifier we relax the speed bar so placement rarely fails.
+    const minSpeed = hasExtra ? 260 : 140;
+    for (let k = Math.floor(path.length * 0.3); k < Math.floor(path.length * 0.7); k++) {
+      const p = path[k]!;
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      if (speed > minSpeed && p.x > SIDE_MARGIN + 40 && p.x < W - SIDE_MARGIN - 40 && p.y < FLOOR_Y - 120) {
+        turbos.push({ id: "turbo-0", pos: { x: p.x, y: p.y }, radius: 24, mult: pick(1.3, 1.5) });
+        break;
+      }
+    }
+  }
+
   // Basin: probe the now-complete structure to find where the ball first meets
   // the floor, then build the basin around that point — near curb behind it,
   // tall far lip ahead of the slide direction.
-  const finale = probe(surfaces, bumpers, pads, spawn);
+  const finale = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
   let floorHit: ProbeSample | null = null;
   for (const p of finale) {
     if (p.y >= FLOOR_Y - 11) {
@@ -337,8 +418,13 @@ export function buildMap(seed: string): GeneratedMap {
   }
   void basinFeedDir; // direction bookkeeping kept for future destination types
 
+  const map: MapDef = { id: `gen-${seed}`, spawn, ballRadius: 10, surfaces, bumpers, pads };
+  if (turbos.length > 0) map.turbos = turbos;
+  if (fields.length > 0) map.fields = fields;
+  if (wind !== undefined) map.wind = wind;
+
   return {
-    map: { id: `gen-${seed}`, spawn, ballRadius: 10, surfaces, bumpers, pads },
+    map,
     archetype: arch.name,
     plannedTravel,
     rampIds,

@@ -51,6 +51,39 @@ export interface Bumper {
   maxHits: number;
 }
 
+export interface TurboRing {
+  id: string;
+  pos: Vec2;
+  radius: number;
+  /** One-shot speed multiplier on entry (preserves direction). e.g. 1.6 */
+  mult: number;
+}
+
+export interface Teleporter {
+  id: string;
+  /** Entrance disc. */
+  a: Vec2;
+  /** Exit point — the ball reappears here with velocity preserved. */
+  b: Vec2;
+  radius: number;
+}
+
+export type ForceFieldKind = "fan" | "lift" | "magnet";
+
+export interface ForceField {
+  id: string;
+  kind: ForceFieldKind;
+  /** Region center. For "magnet" this is also the pull target. */
+  pos: Vec2;
+  /** Half-extents of the rectangular region of influence. */
+  halfW: number;
+  halfH: number;
+  /** Acceleration magnitude (px/s^2). */
+  strength: number;
+  /** Unit direction for "fan" (sideways push). Ignored for lift/magnet. */
+  dir?: Vec2;
+}
+
 export interface MapDef {
   id: string;
   /** Ball spawn point (drop origin). Part of the map — same for every player. */
@@ -59,11 +92,18 @@ export interface MapDef {
   surfaces: Surface[];
   bumpers: Bumper[];
   pads?: BoostPad[];
+  turbos?: TurboRing[];
+  teleporters?: Teleporter[];
+  fields?: ForceField[];
+  /** Global horizontal wind acceleration (px/s^2), +x is rightward. Small (<=5% g). */
+  wind?: number;
 }
 
 export type SimEvent =
   | { tick: number; type: "touch"; id: string; kind: "surface" | "bumper" | "pad" }
   | { tick: number; type: "pad"; padId: string }
+  | { tick: number; type: "turbo"; turboId: string }
+  | { tick: number; type: "teleport"; teleporterId: string }
   | { tick: number; type: "collide"; surfaceId: string; speed: number; normalSpeed: number }
   | { tick: number; type: "bumper"; bumperId: string; hit: number; live: boolean }
   | { tick: number; type: "reversal"; dir: 1 | -1 }

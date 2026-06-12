@@ -39,6 +39,19 @@ describe("generator", () => {
     expect(passed).toBeGreaterThanOrEqual(4);
   });
 
+  it("guarantees every SHIPPED map is interesting: >=3 tangible modifiers + min travel", () => {
+    // The production promise: a passing daily always touches real modifiers and
+    // travels a real distance. Check the actual shipped candidate per seed.
+    for (let i = 0; i < 20; i++) {
+      const d = generateDaily(`promise-${i}`);
+      if (!d.validation.pass) continue; // fallback candidate — not shipped as a daily
+      const m = d.validation.metrics;
+      expect(m.tangibleModifiers).toBeGreaterThanOrEqual(3);
+      expect(m.travel).toBeGreaterThanOrEqual(1.3 * 1280);
+      expect(m.settled).toBe(true);
+    }
+  });
+
   it("validation is reproducible for a given map", () => {
     const gen = buildMap("repro");
     const v1 = validate(gen.map, gen.rampIds);
