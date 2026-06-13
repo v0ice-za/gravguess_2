@@ -1,3 +1,4 @@
+
 // Constructive map generator — the marble-run switchback band, ported from v1's
 // design (see ../gravguess GAME.md) with one major v2 upgrade: construction by
 // simulation. v1 placed catch ramps using a fixed 170px margin tuned to Matter's
@@ -43,6 +44,14 @@ interface Archetype {
   iceP: number;
   trampP: number;
   conveyP: number;
+  /**
+   * Tilt swing of each (non-first) catch ramp: the fraction by which the slope
+   * rises above / falls below the ramp's average tilt, steep at the catch end
+   * and gentler at the lip. Turns the straight switchback band into concave
+   * catch-bowl curves — the #1 fix for "too many straight lines" — while every
+   * segment stays >= MIN_SEG_TILT (no flat trap, the project's law).
+   */
+  curve: [number, number];
 }
 
 // Personalities adapted from v1's ARCH table (incl. its surface-variant odds).
@@ -50,10 +59,56 @@ interface Archetype {
 // clear the reversals gate. Trampolines stay rare — bouncing down a switchback
 // is fun once, but the catch margins can't contain more than that.
 const ARCHETYPES: Archetype[] = [
-  { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 5, iceP: 0.22, trampP: 0.05, conveyP: 0.14 },
-  { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 7, iceP: 0.2, trampP: 0.1, conveyP: 0.16 },
-  { name: "kicker", rampLen: [0.3, 0.44], hop: [42, 56], tilt: [0.18, 0.22], maxRamps: 4, iceP: 0.2, trampP: 0.08, conveyP: 0.12 },
+  { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 5, iceP: 0.22, trampP: 0.05, conveyP: 0.14, curve: [0.9, 1.5] },
+  { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 7, iceP: 0.2, trampP: 0.1, conveyP: 0.16, curve: [0.6, 1.0] },
+  { name: "kicker", rampLen: [0.3, 0.44], hop: [42, 56], tilt: [0.18, 0.22], maxRamps: 4, iceP: 0.2, trampP: 0.08, conveyP: 0.12, curve: [0.7, 1.2] },
 ];
+
+// Segments per curved ramp: enough that the polyline reads as a smooth arc when
+// rendered (each Surface draws as one line), few enough to keep sim cost down.
+const RAMP_ARC_SEGS = 7;
+// The traversal-tilt floor (the project's "no flat trap" law). Curved ramps must
+// keep EVERY segment at least this steep, so the curve never introduces a slow
+// spot the ball can stall on. A small margin above the validator's 0.15.
+const MIN_SEG_TILT = 0.155;
+
+/**
+ * Build a curved catch ramp as a polyline whose tilt eases smoothly from
+ * `tiltHi` at the high (catch) end to `tiltLo` at the low (lip) end — a concave
+ * "catch bowl": steep where it grabs the ball, shallower where it releases it.
+ * Because the tilt is interpolated (never a fixed perpendicular bow) every
+ * segment stays >= MIN_SEG_TILT, so the curve is fair (no flat trap) yet visibly
+ * non-straight. Returns `segs+1` points; the last is exactly `lo` so the catch
+ * geometry the loop planned is preserved. `dir` is the horizontal travel sign.
+ */
+function curvedRampPoints(
+  hi: Vec2,
+  lo: Vec2,
+  dir: 1 | -1,
+  tiltHi: number,
+  tiltLo: number,
+  segs: number,
+): Vec2[] {
+  const span = Math.abs(lo.x - hi.x);
+  const dx = (dir * span) / segs;
+  // Tilt is linear in horizontal progress; integrating it gives the polyline.
+  // We scale the raw integral so the curve lands exactly on lo.y, absorbing any
+  // float drift and keeping the planned drop regardless of the tilt profile.
+  const rawY: number[] = [0];
+  for (let k = 1; k <= segs; k++) {
+    const tMid = (k - 0.5) / segs; // tilt at the middle of this step
+    const tilt = tiltHi + (tiltLo - tiltHi) * tMid;
+    rawY.push(rawY[k - 1]! + tilt * Math.abs(dx));
+  }
+  const drop = lo.y - hi.y;
+  const scale = rawY[segs]! === 0 ? 0 : drop / rawY[segs]!;
+  const pts: Vec2[] = [];
+  for (let k = 0; k <= segs; k++) {
+    pts.push({ x: hi.x + dx * k, y: hi.y + rawY[k]! * scale });
+  }
+  pts[segs] = { x: lo.x, y: lo.y };
+  return pts;
+}
 
 const W = LOGICAL_WIDTH;
 const H = LOGICAL_HEIGHT;
@@ -147,6 +202,7 @@ export function buildMap(seed: string): GeneratedMap {
   const bumpers: Bumper[] = [];
   const pads: BoostPad[] = [];
   const rampIds: string[] = [];
+  let logicalRamps = 0; // distinct ramps (a curved ramp's segments count once)
 
   /** Surface physics per variant kind. */
   const variantFor = (roll: number): { kind: "ramp" | "ice" | "trampoline" | "conveyor"; restitution: number; friction: number } => {
@@ -168,12 +224,23 @@ export function buildMap(seed: string): GeneratedMap {
   let lipY = highY;
 
   for (let i = 0; i < arch.maxRamps; i++) {
-    const tilt = pick(arch.tilt[0], arch.tilt[1]);
+    const avgTilt = pick(arch.tilt[0], arch.tilt[1]);
     let endX = highX + dir * W * pick(arch.rampLen[0], arch.rampLen[1]);
     endX = Math.max(SIDE_MARGIN, Math.min(W - SIDE_MARGIN, endX));
     const span = Math.abs(endX - highX);
     if (span < 150) break;
-    const endY = highY + span * tilt;
+
+    // Tilt profile: a steep catch wall at the high end easing to a gentle lip —
+    // a concave catch bowl/scoop. `curve` is the EXTRA steepness at the catch
+    // end (the lip keeps the base tilt), so the bowl is visibly curved while the
+    // lip — where the ball rolls back up — never drops below the base tilt and
+    // the catch wall grabs hard. The first ramp stays straight (swing 0) so the
+    // boost pad below sits on a predictable slope (v1 law). endY is derived from
+    // the profile's true mean so the polyline lands exactly on it.
+    const swing = i === 0 ? 0 : pick(arch.curve[0], arch.curve[1]);
+    const tiltHi = Math.min(avgTilt * (1 + swing), 0.5);
+    const tiltLo = Math.max(avgTilt, MIN_SEG_TILT);
+    const endY = highY + span * ((tiltHi + tiltLo) / 2);
     if (endY > FLOOR_Y - 110) break;
 
     const id = `ramp-${i}`;
@@ -181,17 +248,29 @@ export function buildMap(seed: string): GeneratedMap {
     // surface). Later ramps roll the archetype's variant odds. Conveyor belts
     // always push downhill (a->b is high->low here).
     const variant = i === 0 ? { kind: "ramp" as const, ...RAMP } : variantFor(rng());
-    const surf: Surface = {
-      id,
-      a: { x: highX, y: highY },
-      b: { x: endX, y: endY },
-      restitution: variant.restitution,
-      friction: variant.friction,
-      kind: variant.kind,
-    };
-    if (variant.kind === "conveyor") surf.belt = pick(240, 360);
-    surfaces.push(surf);
-    rampIds.push(id);
+    const belt = variant.kind === "conveyor" ? pick(240, 360) : undefined;
+    // Curved ramps render as a polyline of segments; the catch geometry the loop
+    // planned (high end -> lip) is preserved, and the probe re-measures the real
+    // trajectory after each ramp so the curve never breaks the catch guarantee.
+    const pts =
+      swing === 0
+        ? [{ x: highX, y: highY }, { x: endX, y: endY }]
+        : curvedRampPoints({ x: highX, y: highY }, { x: endX, y: endY }, dir, tiltHi, tiltLo, RAMP_ARC_SEGS);
+    for (let k = 0; k < pts.length - 1; k++) {
+      const segId = pts.length === 2 ? id : `${id}#${k}`;
+      const surf: Surface = {
+        id: segId,
+        a: pts[k]!,
+        b: pts[k + 1]!,
+        restitution: variant.restitution,
+        friction: variant.friction,
+        kind: variant.kind,
+      };
+      if (belt !== undefined) surf.belt = belt;
+      surfaces.push(surf);
+      rampIds.push(segId);
+    }
+    logicalRamps++;
 
     if (i === 0) {
       // One gentle booster on the first ramp only — mid-run speed injection
@@ -278,7 +357,7 @@ export function buildMap(seed: string): GeneratedMap {
     }
   }
 
-  if (arch.name === "kicker" && rampIds.length >= 2) {
+  if (arch.name === "kicker" && logicalRamps >= 2) {
     // First-light pattern: probe the flight off the last lip, put the bumper on
     // the measured path at ball height, and hang a long return ramp beneath it.
     const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos);
@@ -323,6 +402,7 @@ export function buildMap(seed: string): GeneratedMap {
         kind: "ramp",
       });
       rampIds.push("ramp-return");
+      logicalRamps++;
       plannedTravel += retSpan;
       basinFeedDir = (dir * -1) as 1 | -1;
     }

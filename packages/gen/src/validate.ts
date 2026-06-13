@@ -200,10 +200,20 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   if (base.reversals < MIN_REVERSALS) {
     failures.push(`reversals ${base.reversals} < ${MIN_REVERSALS}`);
   }
-  const rampTouches = rampIds.filter((id) => base.touched.has(id)).length;
-  const requiredRamps = Math.min(MIN_RAMP_TOUCHES, rampIds.length);
+  // A curved ramp is a polyline of segments ided `ramp-2#0`, `ramp-2#1`, …; a
+  // straight ramp is a single `ramp-2`. Count DISTINCT LOGICAL ramps (the part
+  // before `#`) so a curve's seams don't inflate the touch count — the gate's
+  // intent is "the ball traversed N different ramps", not N segments.
+  const logicalRamp = (id: string) => id.split("#")[0]!;
+  const rampGroups = new Set(rampIds.map(logicalRamp));
+  const touchedGroups = new Set<string>();
+  for (const id of rampIds) {
+    if (base.touched.has(id)) touchedGroups.add(logicalRamp(id));
+  }
+  const rampTouches = touchedGroups.size;
+  const requiredRamps = Math.min(MIN_RAMP_TOUCHES, rampGroups.size);
   if (rampTouches < requiredRamps) {
-    failures.push(`ramp touches ${rampTouches}/${rampIds.length} < ${requiredRamps}`);
+    failures.push(`ramp touches ${rampTouches}/${rampGroups.size} < ${requiredRamps}`);
   }
   if (base.tangibleModifiers < MIN_TANGIBLE_MODIFIERS) {
     failures.push(

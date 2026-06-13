@@ -50,7 +50,7 @@ describe("generator", () => {
       expect(m.travel).toBeGreaterThanOrEqual(1.3 * 1280);
       expect(m.settled).toBe(true);
     }
-  });
+  }, 60000); // curved maps carry ~2x the segments, so 20 reject-loops take longer
 
   it("validation is reproducible for a given map", () => {
     const gen = buildMap("repro");

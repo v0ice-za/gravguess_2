@@ -7,7 +7,7 @@ describe("daily publisher", () => {
     const b = buildDaily("2026-06-12");
     expect(a).not.toBeNull();
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
-  });
+  }, 30000); // curved maps are heavier; two full generateRanked passes take longer
 
   it("payload is complete and self-consistent", () => {
     const p = buildDaily("2026-06-13");
@@ -26,5 +26,5 @@ describe("daily publisher", () => {
     const tf = dailyFingerprint(today);
     const same = yf.archetype === tf.archetype && yf.landingThird === tf.landingThird;
     expect(same).toBe(false);
-  });
+  }, 30000); // curved maps are heavier; two full generateRanked passes take longer
 });
