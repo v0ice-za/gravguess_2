@@ -17,7 +17,7 @@ describe("daily publisher", () => {
     expect(p!.parPx).toBeGreaterThan(0);
     expect(p!.landing.y).toBeGreaterThan(0);
     expect(p!.funScore).toBeGreaterThan(0);
-  });
+  }, 30000); // 4 archetypes incl. pinball's multi-probe build — generateRanked takes longer
 
   it("variety check avoids repeating yesterday's fingerprint when possible", () => {
     const yesterday = buildDaily("2026-06-14")!;

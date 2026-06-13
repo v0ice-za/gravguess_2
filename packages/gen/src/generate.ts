@@ -28,7 +28,7 @@ import {
   type Vec2,
 } from "@gravguess/sim";
 
-export type ArchetypeName = "sweep" | "stairs" | "kicker";
+export type ArchetypeName = "sweep" | "stairs" | "kicker" | "pinball";
 
 interface Archetype {
   name: ArchetypeName;
@@ -62,7 +62,23 @@ const ARCHETYPES: Archetype[] = [
   { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 5, iceP: 0.22, trampP: 0.05, conveyP: 0.14, curve: [0.9, 1.5] },
   { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 7, iceP: 0.2, trampP: 0.1, conveyP: 0.16, curve: [0.6, 1.0] },
   { name: "kicker", rampLen: [0.3, 0.44], hop: [42, 56], tilt: [0.18, 0.22], maxRamps: 4, iceP: 0.2, trampP: 0.08, conveyP: 0.12, curve: [0.7, 1.2] },
+  // Pinball: a wide, gentle switchback band (slow, long journey) studded with a
+  // bumper on EVERY hop — the ball pings off a bumper, the catch ramp below
+  // re-converges the kick, ping again. Built by the normal switchback loop; the
+  // per-hop bumper is added there (PINBALL_HOP_KICK). Bigger hops give the kicked
+  // ball room to ricochet before the catch grabs it.
+  { name: "pinball", rampLen: [0.34, 0.48], hop: [42, 54], tilt: [0.16, 0.19], maxRamps: 6, iceP: 0.16, trampP: 0.06, conveyP: 0.12, curve: [0.5, 0.9] },
 ];
+
+// Pinball bumper tuning (tuned against the batch). Bumpers are sprinkled along
+// the COMPLETED sweep band's flight arcs, gentler than the finale bumpers
+// (620-760): each only needs to nudge the ball for a ricochet. A bumper is kept
+// only if it stays a bounded, still-settling perturbation (final landing moves
+// < PINBALL_MAX_DEFLECT and the ball doesn't get trapped) — so the proven band's
+// travel/reversals/readable-spread survive, with ricochets added on top.
+const PINBALL_HOP_KICK: [number, number] = [260, 420];
+const PINBALL_MAX_DEFLECT = 190; // px the final landing may move before we drop a bumper
+const PINBALL_BANDS = [0.24, 0.46, 0.68]; // descent fractions to space ricochets across
 
 // Segments per curved ramp: enough that the polyline reads as a smooth arc when
 // rendered (each Surface draws as one line), few enough to keep sim cost down.
@@ -319,10 +335,54 @@ export function buildMap(seed: string): GeneratedMap {
     dir = dir === 1 ? -1 : 1;
   }
 
+  // ---- Pinball: sprinkle ricochets along the completed band ----
+  // The band above is a clean sweep (proven travel/reversals/spread). Drop a
+  // bumper near each of several evenly-spaced altitude bands so the ricochets
+  // span the WHOLE descent (not a top cluster), keeping only the ones that stay
+  // a bounded, still-settling nudge — so the read stays fair and every descent
+  // becomes a ping... fall... ping journey instead of a quiet slide. A finale
+  // bumper is added below regardless, so pinball is never bumper-less.
+  if (arch.name === "pinball") {
+    let placed = 0;
+    for (const frac of PINBALL_BANDS) {
+      const targetY = spawn.y + (FLOOR_Y - spawn.y) * frac;
+      const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      const cleanEndX = path[path.length - 1]!.x;
+      // The descending flight point nearest this band's target altitude.
+      let cand: ProbeSample | null = null;
+      let bestD = Infinity;
+      for (const p of path) {
+        if (p.vy < 40) continue; // a descending flight moment, not a roll
+        if (p.y > FLOOR_Y - 130) continue; // leave the floor approach to the basin
+        if (p.x < SIDE_MARGIN + 50 || p.x > W - SIDE_MARGIN - 50) continue;
+        const d = Math.abs(p.y - targetY);
+        if (d < bestD) {
+          bestD = d;
+          cand = p;
+        }
+      }
+      if (!cand || bestD > 130) continue;
+      bumpers.push({
+        id: `bumper-pin-${placed}`,
+        pos: { x: cand.x, y: cand.y + 30 }, // top graze, just under the arc
+        radius: pickInt(20, 26),
+        kick: pick(PINBALL_HOP_KICK[0], PINBALL_HOP_KICK[1]),
+        maxHits: 3,
+      });
+      const test = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      const tEnd = test[test.length - 1]!;
+      const bounded = Math.abs(tEnd.x - cleanEndX) < PINBALL_MAX_DEFLECT;
+      const settling = tEnd.y > FLOOR_Y - 60; // still reached the floor region
+      const notTrapped = test.length < path.length * 1.7; // no endless bounce loop
+      if (bounded && settling && notTrapped) placed++;
+      else bumpers.pop(); // breaks fairness — drop it, try the next band
+    }
+  }
+
   // ---- Finale ----
   let basinFeedDir = dir;
 
-  if (arch.name !== "kicker") {
+  if (arch.name === "sweep" || arch.name === "stairs" || arch.name === "pinball") {
     // v1 law: every map carries one guaranteed chaos element. Non-kicker maps
     // put bumpers on the final flight off the band, where the only thing
     // downstream is the basin — which absorbs the kick. (Putting them in an

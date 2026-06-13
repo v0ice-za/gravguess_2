@@ -37,7 +37,7 @@ describe("generator", () => {
       if (d.validation.pass) passed++;
     }
     expect(passed).toBeGreaterThanOrEqual(4);
-  });
+  }, 30000); // 4 archetypes incl. pinball's multi-probe build — reject loops take longer
 
   it("guarantees every SHIPPED map is interesting: >=3 tangible modifiers + min travel", () => {
     // The production promise: a passing daily always touches real modifiers and
