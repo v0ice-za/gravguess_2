@@ -19,9 +19,9 @@ describe("daily publisher", () => {
     expect(p!.funScore).toBeGreaterThan(0);
   }, 30000); // 4 archetypes incl. pinball's multi-probe build — generateRanked takes longer
 
-  it("variety check avoids repeating yesterday's fingerprint when possible", () => {
+  it("variety check rotates the archetype away from recent days when possible", () => {
     const yesterday = buildDaily("2026-06-14")!;
-    const today = buildDaily("2026-06-15", dailyFingerprint(yesterday))!;
+    const today = buildDaily("2026-06-15", [dailyFingerprint(yesterday)])!;
     const yf = dailyFingerprint(yesterday);
     const tf = dailyFingerprint(today);
     const same = yf.archetype === tf.archetype && yf.landingThird === tf.landingThird;

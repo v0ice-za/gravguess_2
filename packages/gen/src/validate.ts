@@ -128,6 +128,18 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
     if (VARIANT_KINDS.has(surf.kind) && s.touched.has(surf.id)) variantSurfaces.add(surf.kind);
   }
 
+  // A completed loop-the-loop: touching most of a loop's `loopseg-` segments
+  // means the ball rode all the way around — unmistakably a tangible interaction.
+  let loopSegsOnMap = 0;
+  let loopSegsTouched = 0;
+  for (const surf of map.surfaces) {
+    if (surf.id.startsWith("loopseg-")) {
+      loopSegsOnMap++;
+      if (s.touched.has(surf.id)) loopSegsTouched++;
+    }
+  }
+  const didLoop = loopSegsOnMap > 0 && loopSegsTouched >= Math.ceil(loopSegsOnMap * 0.6);
+
   const dweltFieldIds: string[] = [];
   const dweltFieldKinds = new Set<string>();
   for (let i = 0; i < fields.length; i++) {
@@ -144,13 +156,15 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
   if (turboFires.size > 0) modifierKinds.push("turbo");
   if (teleports.size > 0) modifierKinds.push("teleporter");
   for (const k of dweltFieldKinds) modifierKinds.push(k);
+  if (didLoop) modifierKinds.push("loop");
   const tangibleModifiers =
     firedPads.size +
     liveBumpers.size +
     variantSurfaces.size +
     turboFires.size +
     teleports.size +
-    dweltFieldKinds.size;
+    dweltFieldKinds.size +
+    (didLoop ? 1 : 0);
 
   const settled = s.events[s.events.length - 1]?.type === "settle";
   return {
@@ -199,11 +213,16 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   if (base.travel < minTravel * W) {
     failures.push(`travel too short: ${(base.travel / W).toFixed(2)}x width < ${minTravel}x`);
   }
-  if (base.spanX < MIN_HORIZONTAL_RANGE * W) {
-    failures.push(`horizontal span ${(base.spanX / W * 100).toFixed(0)}% < ${MIN_HORIZONTAL_RANGE * 100}%`);
+  // A loop is a compact spectacle: the ball's "distance" is the ~2pi*R it travels
+  // AROUND the loop (gated by travel above), not canvas coverage — so it gets a
+  // gentler span requirement, the way stairs/kicker get a gentler travel one.
+  const minSpanX = archetype === "loop" ? 0.4 : MIN_HORIZONTAL_RANGE;
+  const minSpanY = archetype === "loop" ? 0.42 : MIN_VERTICAL_RANGE;
+  if (base.spanX < minSpanX * W) {
+    failures.push(`horizontal span ${(base.spanX / W * 100).toFixed(0)}% < ${minSpanX * 100}%`);
   }
-  if (base.spanY < MIN_VERTICAL_RANGE * H) {
-    failures.push(`vertical span ${(base.spanY / H * 100).toFixed(0)}% < ${MIN_VERTICAL_RANGE * 100}%`);
+  if (base.spanY < minSpanY * H) {
+    failures.push(`vertical span ${(base.spanY / H * 100).toFixed(0)}% < ${minSpanY * 100}%`);
   }
   if (base.reversals < MIN_REVERSALS) {
     failures.push(`reversals ${base.reversals} < ${MIN_REVERSALS}`);

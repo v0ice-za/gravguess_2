@@ -21,7 +21,10 @@ describe("generator", () => {
     for (const seed of ["law-1", "law-2", "law-3"]) {
       const { map } = buildMap(seed);
       for (const s of map.surfaces) {
-        if (s.kind === "ramp") {
+        // Loop-the-loop segments (`loopseg-`) are a circle — their top/bottom
+        // arcs are legitimately near-horizontal; the no-flat-trap law is about
+        // traversal ramps the ball could rest on, not a track it races around.
+        if (s.kind === "ramp" && !s.id.startsWith("loopseg-")) {
           const tilt = Math.abs(s.b.y - s.a.y) / Math.abs(s.b.x - s.a.x);
           expect(tilt).toBeGreaterThanOrEqual(0.15);
         }

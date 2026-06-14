@@ -17,25 +17,27 @@ const start = startArg ? new Date(`${startArg}T00:00:00Z`) : new Date();
 
 const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
-// Variety check needs yesterday's fingerprint — load it if already published.
-const dayBefore = new Date(start.getTime() - 86400000);
-let previous: ReturnType<typeof dailyFingerprint> | undefined;
-const prevPath = join(outDir, `${fmt(dayBefore)}.json`);
-if (existsSync(prevPath)) {
-  previous = dailyFingerprint(JSON.parse(readFileSync(prevPath, "utf8")) as DailyPayload);
+// Archetype rotation looks back a few days — seed `recent` (most recent first)
+// from already-published files so a fresh run continues the rotation cleanly.
+const RECENT_WINDOW = 3;
+let recent: ReturnType<typeof dailyFingerprint>[] = [];
+for (let k = 1; k <= RECENT_WINDOW; k++) {
+  const d = new Date(start.getTime() - k * 86400000);
+  const p = join(outDir, `${fmt(d)}.json`);
+  if (existsSync(p)) recent.push(dailyFingerprint(JSON.parse(readFileSync(p, "utf8")) as DailyPayload));
 }
 
 let published = 0;
 for (let i = 0; i < days; i++) {
   const date = fmt(new Date(start.getTime() + i * 86400000));
-  const payload = buildDaily(date, previous);
+  const payload = buildDaily(date, recent);
   if (!payload) {
     console.error(`!! ${date}: no passing candidates — NOT published`);
-    previous = undefined;
+    recent = [];
     continue;
   }
   writeFileSync(join(outDir, `${date}.json`), JSON.stringify(payload));
-  previous = dailyFingerprint(payload);
+  recent = [dailyFingerprint(payload), ...recent].slice(0, RECENT_WINDOW);
   published++;
   console.log(
     `${date}  ${payload.archetype.padEnd(7)} seed=${payload.seed.padEnd(16)} ` +

@@ -86,14 +86,25 @@ export function generateDaily(seed: string, maxAttempts = 150, collect = 6): Dai
 }
 
 /**
- * Collect up to `wanted` passing candidates and return them ranked by fun score
- * (best first). Used by the offline publisher; never runs on the client.
+ * Collect passing candidates ranked by fun score (best first). Used by the
+ * offline publisher; never runs on the client.
+ *
+ * A per-archetype cap keeps the pool DIVERSE: without it an easy-to-generate
+ * archetype (loops pass ~6x more often than the others) floods every survivor
+ * slot, leaving the publisher's archetype rotation nothing to rotate to. Capping
+ * each archetype guarantees the pool spans the styles that can pass, so the
+ * rotation can actually balance the daily mix.
  */
-export function generateRanked(seed: string, wanted = 6, maxAttempts = 400): DailyMap[] {
+export function generateRanked(seed: string, wanted = 8, maxAttempts = 600, perArchetypeCap = 2): DailyMap[] {
   const survivors: DailyMap[] = [];
+  const perArch = new Map<ArchetypeName, number>();
   for (let attempt = 0; attempt < maxAttempts && survivors.length < wanted; attempt++) {
     const candidate = candidateAt(seed, attempt);
-    if (candidate.validation.pass) survivors.push(candidate);
+    if (!candidate.validation.pass) continue;
+    const count = perArch.get(candidate.archetype) ?? 0;
+    if (count >= perArchetypeCap) continue; // pool diversity over more of the same
+    survivors.push(candidate);
+    perArch.set(candidate.archetype, count + 1);
   }
   survivors.sort((a, b) => b.funScore - a.funScore);
   return survivors;

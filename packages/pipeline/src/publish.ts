@@ -54,10 +54,13 @@ function survivorPar(d: DailyMap): number {
 }
 
 /**
- * Pick the day's map from ranked survivors, avoiding a repeat of yesterday's
- * fingerprint (two near-identical days reads as "the game ran out of content").
+ * Pick the day's map from ranked survivors, rotating through archetypes so the
+ * daily feels fresh. `recent` is the last few days' fingerprints (most recent
+ * first): we prefer the best survivor whose archetype HASN'T shipped in that
+ * window, which both stops one easy-to-generate archetype (e.g. loops) from
+ * dominating and guarantees the rarer ones get their turn.
  */
-export function buildDaily(date: string, previous?: Fingerprint | undefined): DailyPayload | null {
+export function buildDaily(date: string, recent: Fingerprint[] = []): DailyPayload | null {
   const all = generateRanked(date);
   if (all.length === 0) return null;
 
@@ -68,14 +71,20 @@ export function buildDaily(date: string, previous?: Fingerprint | undefined): Da
   const survivors = underCap.length > 0 ? underCap : all;
 
   // Freshness beats fun score: a slightly less spectacular map that FEELS new
-  // is worth more to a daily ritual than the same archetype two days running.
+  // is worth more to a daily ritual than the same archetype run after run.
   let chosen = survivors[0]!;
-  if (previous) {
-    const newArchetype = survivors.find((s) => fingerprint(s).archetype !== previous.archetype);
-    const newRegion = survivors.find(
-      (s) => fingerprint(s).landingThird !== previous.landingThird,
-    );
-    chosen = newArchetype ?? newRegion ?? chosen;
+  const recentArchetypes = new Set(recent.map((f) => f.archetype));
+  const unseen = survivors.find((s) => !recentArchetypes.has(fingerprint(s).archetype));
+  if (unseen) {
+    chosen = unseen; // an archetype not used in the recent window — best variety
+  } else if (recent.length > 0) {
+    // Every archetype shipped recently; at least don't repeat yesterday's, and
+    // failing that move the landing to a different third of the floor.
+    const prev = recent[0]!;
+    chosen =
+      survivors.find((s) => fingerprint(s).archetype !== prev.archetype) ??
+      survivors.find((s) => fingerprint(s).landingThird !== prev.landingThird) ??
+      chosen;
   }
   // If we had to fall back to over-cap maps, pick the most readable one.
   if (underCap.length === 0) {

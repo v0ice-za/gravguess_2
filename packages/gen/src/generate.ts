@@ -28,7 +28,7 @@ import {
   type Vec2,
 } from "@gravguess/sim";
 
-export type ArchetypeName = "sweep" | "stairs" | "kicker" | "pinball";
+export type ArchetypeName = "sweep" | "stairs" | "kicker" | "pinball" | "loop";
 
 interface Archetype {
   name: ArchetypeName;
@@ -68,6 +68,10 @@ const ARCHETYPES: Archetype[] = [
   // per-hop bumper is added there (PINBALL_HOP_KICK). Bigger hops give the kicked
   // ball room to ricochet before the catch grabs it.
   { name: "pinball", rampLen: [0.34, 0.48], hop: [42, 54], tilt: [0.16, 0.19], maxRamps: 6, iceP: 0.16, trampP: 0.06, conveyP: 0.12, curve: [0.5, 0.9] },
+  // Loop is built by a dedicated path (the switchback loop is a no-op via
+  // maxRamps 0): a steep feeder + tangent run-up + turbo flings the ball around a
+  // trackmania-style vertical loop, then it drops out the lower-left to a basin.
+  { name: "loop", rampLen: [0, 0], hop: [0, 0], tilt: [0, 0], maxRamps: 0, iceP: 0, trampP: 0, conveyP: 0, curve: [0, 0] },
 ];
 
 // Pinball bumper tuning (tuned against the batch). Bumpers are sprinkled along
@@ -124,6 +128,42 @@ function curvedRampPoints(
   }
   pts[segs] = { x: lo.x, y: lo.y };
   return pts;
+}
+
+// Loop-the-loop tuning (verified on the sim: a fed ball completes R=82-108 loops
+// with margin). The circle is drawn from phi=0 (bottom, where the ball enters
+// moving right) around to LOOP_ARC_DEG, leaving the lower-left open as the exit.
+// Friction is near-zero so the ball keeps the speed it needs to stay on the
+// inside track; a turbo on the tangent run-up gives the entry-speed margin so
+// EVERY perturbed spawn completes too (else the spread gate would reject it).
+const LOOP_RADIUS: [number, number] = [82, 106];
+const LOOP_ARC_DEG = 290; // bottom -> right -> top -> left, leaving the lower-left open to exit
+const LOOP_FRICTION = 0.015;
+const LOOP_REST = 0.25;
+const LOOP_TURBO: [number, number] = [1.7, 2.0];
+
+/**
+ * Segments of a vertical loop centred at (cx,cy), radius R, swept from phi=0
+ * (bottom) to phiEndDeg. point(phi) = (cx + R sin phi, cy + R cos phi): phi
+ * increases bottom -> right -> top -> left, so the ball entering the bottom
+ * moving +x rides up the right side and over. Ids are `loopseg-i` (distinct from
+ * the `loop-feed`/`loop-run` approach) so the validator can spot a ridden loop.
+ */
+function loopSegments(cx: number, cy: number, R: number, phiEndDeg: number, n: number): Surface[] {
+  const segs: Surface[] = [];
+  for (let i = 0; i < n; i++) {
+    const p1 = ((phiEndDeg * i) / n) * (Math.PI / 180);
+    const p2 = ((phiEndDeg * (i + 1)) / n) * (Math.PI / 180);
+    segs.push({
+      id: `loopseg-${i}`,
+      a: { x: cx + R * Math.sin(p1), y: cy + R * Math.cos(p1) },
+      b: { x: cx + R * Math.sin(p2), y: cy + R * Math.cos(p2) },
+      restitution: LOOP_REST,
+      friction: LOOP_FRICTION,
+      kind: "ramp",
+    });
+  }
+  return segs;
 }
 
 const W = LOGICAL_WIDTH;
@@ -228,7 +268,9 @@ export function buildMap(seed: string): GeneratedMap {
     return { kind: "ramp", ...RAMP };
   };
 
-  const spawnX = W * pick(0.18, 0.82);
+  // Loop spawns on the left so the feeder runs left->right into the loop bottom
+  // (the ball must enter moving +x to ride up the right side).
+  const spawnX = arch.name === "loop" ? W * pick(0.1, 0.26) : W * pick(0.18, 0.82);
   const spawn = { x: spawnX, y: 40 };
   let dir: 1 | -1 = spawnX < W / 2 ? 1 : -1;
 
@@ -377,6 +419,39 @@ export function buildMap(seed: string): GeneratedMap {
       if (bounded && settling && notTrapped) placed++;
       else bumpers.pop(); // breaks fairness — drop it, try the next band
     }
+  }
+
+  // ---- Loop-the-loop ----
+  // A steep ice feeder + a tangent run-up + a turbo fling the ball around a
+  // vertical loop, then it drops out the lower-left and falls to the basin. The
+  // turbo gives entry-speed MARGIN so every perturbed spawn completes the loop
+  // too — the spread gate rejects any build where some perturbations fall off.
+  if (arch.name === "loop") {
+    const R = pick(LOOP_RADIUS[0], LOOP_RADIUS[1]);
+    const cx = W * pick(0.5, 0.62);
+    const cy = pick(232, 292); // bottom in [~318,398]: clears ceiling, room to fall after
+    const bottomY = cy + R;
+    const runStartX = cx - R - pick(60, 100);
+    const feedHighY = pick(72, 104);
+    // Steep ice feeder + a flat tangent run-up to the loop bottom (same height as
+    // the loop's inner floor so the ball enters cleanly, no drop/chatter that
+    // bleeds its speed). The feeder's high end sits LEFT of the spawn so the ball
+    // lands mid-ramp and slides — dropping exactly onto the end vertex stalls it.
+    const feedHighX = Math.max(SIDE_MARGIN, spawnX - 80);
+    surfaces.push({ id: "loop-feed", a: { x: feedHighX, y: feedHighY }, b: { x: runStartX, y: bottomY }, restitution: 0.2, friction: 0.03, kind: "ice" });
+    surfaces.push({ id: "loop-run", a: { x: runStartX, y: bottomY }, b: { x: cx, y: bottomY }, restitution: 0.2, friction: 0.012, kind: "ice" });
+    rampIds.push("loop-feed", "loop-run");
+    turbos.push({ id: "turbo-loop", pos: { x: cx - R - 12, y: bottomY - 2 }, radius: 26, mult: pick(LOOP_TURBO[0], LOOP_TURBO[1]) });
+    const lsegs = loopSegments(cx, cy, R, LOOP_ARC_DEG, Math.round(R * 0.5));
+    for (const sg of lsegs) {
+      surfaces.push(sg);
+      rampIds.push(sg.id);
+    }
+    // Bookkeeping for the basin tail: the ball exits the lower-left moving down.
+    lipX = cx - R * 0.7;
+    lipY = bottomY;
+    dir = -1;
+    plannedTravel += 2 * Math.PI * R + (bottomY - feedHighY);
   }
 
   // ---- Finale ----
