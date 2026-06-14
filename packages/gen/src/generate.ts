@@ -61,7 +61,7 @@ interface Archetype {
 const ARCHETYPES: Archetype[] = [
   { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 5, iceP: 0.22, trampP: 0.05, conveyP: 0.14, curve: [0.9, 1.5] },
   { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 7, iceP: 0.2, trampP: 0.1, conveyP: 0.16, curve: [0.6, 1.0] },
-  { name: "kicker", rampLen: [0.3, 0.44], hop: [42, 56], tilt: [0.18, 0.22], maxRamps: 4, iceP: 0.2, trampP: 0.08, conveyP: 0.12, curve: [0.7, 1.2] },
+  { name: "kicker", rampLen: [0.32, 0.46], hop: [40, 50], tilt: [0.16, 0.2], maxRamps: 5, iceP: 0.2, trampP: 0.08, conveyP: 0.12, curve: [0.45, 0.85] },
   // Pinball: a wide, gentle switchback band (slow, long journey) studded with a
   // bumper on EVERY hop — the ball pings off a bumper, the catch ramp below
   // re-converges the kick, ping again. Built by the normal switchback loop; the

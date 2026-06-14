@@ -21,9 +21,12 @@ const MIN_RUN_TICKS = 3.5 * TICK_RATE; // ≥3.5s of motion
 // v1's calibration learning: completed runs measure ~1.6-2.0x travel; gates above
 // what the generator actually produces exhaust the search and ship fallbacks.
 // Stairs maps trade horizontal distance for turn density (v1 did the same
-// per-style override for mid-bowl: 1.25x vs 1.75x).
+// per-style override for mid-bowl: 1.25x vs 1.75x). Kicker trades distance for
+// its dramatic single kick + return ramp — a short band by design — so it gets
+// the same kind of override.
 const MIN_TRAVEL_RATIO = 1.55; // path length vs canvas width
 const MIN_TRAVEL_RATIO_STAIRS = 1.3;
+const MIN_TRAVEL_RATIO_KICKER = 1.35;
 const MIN_HORIZONTAL_RANGE = 0.45;
 const MIN_VERTICAL_RANGE = 0.6;
 const MIN_REVERSALS = 3;
@@ -187,7 +190,12 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   if (base.ticks < MIN_RUN_TICKS) {
     failures.push(`run too quick: ${(base.ticks / TICK_RATE).toFixed(1)}s < ${(MIN_RUN_TICKS / TICK_RATE).toFixed(1)}s`);
   }
-  const minTravel = archetype === "stairs" ? MIN_TRAVEL_RATIO_STAIRS : MIN_TRAVEL_RATIO;
+  const minTravel =
+    archetype === "stairs"
+      ? MIN_TRAVEL_RATIO_STAIRS
+      : archetype === "kicker"
+        ? MIN_TRAVEL_RATIO_KICKER
+        : MIN_TRAVEL_RATIO;
   if (base.travel < minTravel * W) {
     failures.push(`travel too short: ${(base.travel / W).toFixed(2)}x width < ${minTravel}x`);
   }
