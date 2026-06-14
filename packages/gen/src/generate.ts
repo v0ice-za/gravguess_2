@@ -605,6 +605,59 @@ export function buildMap(seed: string): GeneratedMap {
     }
   }
 
+  // Elevated destination: a raised pod that catches the ball HIGH or MID instead
+  // of always on the floor — the biggest Y-axis variety lever. Built only if a
+  // re-probe confirms the ball actually settles in it (a deep bowl it drops into
+  // and can't bounce out of); otherwise it's removed and the floor basin below
+  // catches the ball as usual. Skipped for loop (already its own structure).
+  let podSettleY: number | null = null;
+  if (arch.name !== "loop" && rng() < 0.55) {
+    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+    // Catch the ball LATE — after it has finished its band journey (and its finale
+    // bumper) — at whatever raised height it's descending through, so the run
+    // still earns its travel/reversals and just rests higher than the floor.
+    // (Catching it early would cut the journey short.) Want a steeply-descending,
+    // open-air point above the floor: more vertical than horizontal so it drops in.
+    let entry: ProbeSample | null = null;
+    for (let k = Math.floor(path.length * 0.62); k < path.length; k++) {
+      const p = path[k]!;
+      if (p.vy > 70 && p.vy > Math.abs(p.vx) && p.y > 225 && p.y < FLOOR_Y - 130 && p.x > SIDE_MARGIN + 95 && p.x < W - SIDE_MARGIN - 95) {
+        entry = p;
+        break;
+      }
+    }
+    if (entry) {
+      const px = entry.x;
+      const podY = entry.y + pick(62, 92); // floor below the entry point
+      const PW = pick(58, 80);
+      const PH = podY - (entry.y - 22); // walls reach ~22px above the entry point
+      surfaces.push({ id: "pod-floor", a: { x: px - PW, y: podY }, b: { x: px + PW, y: podY }, restitution: 0.18, friction: 0.6, kind: "basin" });
+      surfaces.push({ id: "pod-wall-l", a: { x: px - PW, y: podY }, b: { x: px - PW, y: podY - PH }, restitution: 0.22, friction: 0.3, kind: "lip" });
+      surfaces.push({ id: "pod-wall-r", a: { x: px + PW, y: podY }, b: { x: px + PW, y: podY - PH }, restitution: 0.22, friction: 0.3, kind: "lip" });
+      // Verify the ball comes to rest INSIDE the pod; if not, tear it back out.
+      const test = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      const end = test[test.length - 1]!;
+      if (Math.abs(end.y - (podY - 10)) < 46 && Math.abs(end.x - px) < PW + 12) {
+        podSettleY = podY;
+        // The pod ends the run early, so a finale bumper aimed at the floor flight
+        // is now orphaned. Re-run and drop any bumper the ball no longer reaches
+        // (the pod itself stands in as the map's interest — see validate.ts).
+        const podMap: MapDef = { id: "podcheck", spawn, ballRadius: 10, surfaces, bumpers, pads };
+        if (turbos.length > 0) podMap.turbos = turbos;
+        if (fields.length > 0) podMap.fields = fields;
+        if (wind !== undefined) podMap.wind = wind;
+        const rs = createRun(podMap);
+        while (!rs.done) step(rs);
+        for (let bi = bumpers.length - 1; bi >= 0; bi--) {
+          if (!rs.touched.has(bumpers[bi]!.id)) bumpers.splice(bi, 1);
+        }
+      } else {
+        surfaces.splice(surfaces.length - 3, 3); // remove pod, fall through to the floor
+      }
+    }
+  }
+  void podSettleY;
+
   // Basin: probe the now-complete structure to find where the ball first meets
   // the floor, then build the basin around that point — near curb behind it,
   // tall far lip ahead of the slide direction.

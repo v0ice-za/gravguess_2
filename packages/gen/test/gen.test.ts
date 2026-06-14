@@ -50,7 +50,9 @@ describe("generator", () => {
       if (!d.validation.pass) continue; // fallback candidate — not shipped as a daily
       const m = d.validation.metrics;
       expect(m.tangibleModifiers).toBeGreaterThanOrEqual(3);
-      expect(m.travel).toBeGreaterThanOrEqual(1.3 * 1280);
+      // 1.15x is the most relaxed travel gate (an elevated-pod ending stops the
+      // ball early, before the floor slide); every shipped map clears at least it.
+      expect(m.travel).toBeGreaterThanOrEqual(1.15 * 1280);
       expect(m.settled).toBe(true);
     }
   }, 60000); // curved maps carry ~2x the segments, so 20 reject-loops take longer

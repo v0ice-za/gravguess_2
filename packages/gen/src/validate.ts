@@ -27,6 +27,7 @@ const MIN_RUN_TICKS = 3.5 * TICK_RATE; // ≥3.5s of motion
 const MIN_TRAVEL_RATIO = 1.55; // path length vs canvas width
 const MIN_TRAVEL_RATIO_STAIRS = 1.3;
 const MIN_TRAVEL_RATIO_KICKER = 1.35;
+const MIN_TRAVEL_RATIO_POD = 1.15; // a pod ends the run early (no floor slide), so less path
 const MIN_HORIZONTAL_RANGE = 0.45;
 const MIN_VERTICAL_RANGE = 0.6;
 const MIN_REVERSALS = 3;
@@ -140,6 +141,11 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
   }
   const didLoop = loopSegsOnMap > 0 && loopSegsTouched >= Math.ceil(loopSegsOnMap * 0.6);
 
+  // Settling in an elevated pod (raised destination) is a tangible interaction in
+  // its own right — and it replaces the finale bumper the early stop orphaned.
+  const restedInPod =
+    map.surfaces.some((su) => su.id === "pod-floor" && s.touched.has(su.id)) && s.py < LOGICAL_HEIGHT - 110;
+
   const dweltFieldIds: string[] = [];
   const dweltFieldKinds = new Set<string>();
   for (let i = 0; i < fields.length; i++) {
@@ -157,6 +163,7 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
   if (teleports.size > 0) modifierKinds.push("teleporter");
   for (const k of dweltFieldKinds) modifierKinds.push(k);
   if (didLoop) modifierKinds.push("loop");
+  if (restedInPod) modifierKinds.push("elevated pod");
   const tangibleModifiers =
     firedPads.size +
     liveBumpers.size +
@@ -164,7 +171,8 @@ export function measureRun(map: MapDef, spawn?: Vec2): RunMetrics {
     turboFires.size +
     teleports.size +
     dweltFieldKinds.size +
-    (didLoop ? 1 : 0);
+    (didLoop ? 1 : 0) +
+    (restedInPod ? 1 : 0);
 
   const settled = s.events[s.events.length - 1]?.type === "settle";
   return {
@@ -200,12 +208,20 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   const base = measureRun(map);
   const failures: string[] = [];
 
+  // An elevated-pod ending stops the ball HIGH on purpose (the Y-axis variety the
+  // game wanted), which necessarily cuts the long floor slide — so a pod map earns
+  // gentler travel / reversal / vertical-span bars (the way stairs/kicker get a
+  // gentler travel one). The pod itself is gated to settle by construction.
+  const settledInPod =
+    map.surfaces.some((s) => s.id === "pod-floor") && base.landing.y < H - 110;
+
   if (!base.settled) failures.push("did not settle (timeout)");
   if (base.ticks < MIN_RUN_TICKS) {
     failures.push(`run too quick: ${(base.ticks / TICK_RATE).toFixed(1)}s < ${(MIN_RUN_TICKS / TICK_RATE).toFixed(1)}s`);
   }
-  const minTravel =
-    archetype === "stairs"
+  const minTravel = settledInPod
+    ? MIN_TRAVEL_RATIO_POD
+    : archetype === "stairs"
       ? MIN_TRAVEL_RATIO_STAIRS
       : archetype === "kicker"
         ? MIN_TRAVEL_RATIO_KICKER
@@ -215,17 +231,18 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   }
   // A loop is a compact spectacle: the ball's "distance" is the ~2pi*R it travels
   // AROUND the loop (gated by travel above), not canvas coverage — so it gets a
-  // gentler span requirement, the way stairs/kicker get a gentler travel one.
+  // gentler span requirement. Elevated pods get the same gentler vertical span.
   const minSpanX = archetype === "loop" ? 0.4 : MIN_HORIZONTAL_RANGE;
-  const minSpanY = archetype === "loop" ? 0.42 : MIN_VERTICAL_RANGE;
+  const minSpanY = archetype === "loop" ? 0.42 : settledInPod ? 0.3 : MIN_VERTICAL_RANGE;
   if (base.spanX < minSpanX * W) {
     failures.push(`horizontal span ${(base.spanX / W * 100).toFixed(0)}% < ${minSpanX * 100}%`);
   }
   if (base.spanY < minSpanY * H) {
     failures.push(`vertical span ${(base.spanY / H * 100).toFixed(0)}% < ${minSpanY * 100}%`);
   }
-  if (base.reversals < MIN_REVERSALS) {
-    failures.push(`reversals ${base.reversals} < ${MIN_REVERSALS}`);
+  const minReversals = settledInPod ? 2 : MIN_REVERSALS;
+  if (base.reversals < minReversals) {
+    failures.push(`reversals ${base.reversals} < ${minReversals}`);
   }
   // A curved ramp is a polyline of segments ided `ramp-2#0`, `ramp-2#1`, …; a
   // straight ramp is a single `ramp-2`. Count DISTINCT LOGICAL ramps (the part

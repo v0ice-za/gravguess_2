@@ -8,10 +8,12 @@ import { firstLight } from "../src/maps/first-light.ts";
 
 // Updated 2026-06-12: Coulomb impact friction added to the sim (catch-ramp
 // re-convergence physics) — trajectory legitimately changed.
+// Updated 2026-06-14: stiction added (a slow-rolling ball now grinds to a stop,
+// even on ice) — the ball settles ~30 ticks sooner; same landing.
 export const GOLDEN = {
   mapId: "first-light-v1",
-  digest: "0e6c59844c67382c",
-  ticks: 605,
+  digest: "d71af03787446eef",
+  ticks: 575,
   landingX: 270.0,
   landingY: 622.0,
 };

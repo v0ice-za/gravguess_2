@@ -28,6 +28,11 @@ const INERT_BUMPER_RESTITUTION = 0.35;
 const CONTACT_PASSES = 3; // collision resolution passes per tick (handles corners)
 const BELT_ACCEL = 900; // px/s^2 a conveyor applies toward its belt speed
 const ROLLING_K = 50; // constant rolling deceleration = friction * ROLLING_K (px/s^2)
+// Stiction: extra deceleration applied only to a SLOW-rolling ball (below
+// STICTION_SPEED), so even a frictionless ice slide eventually comes to rest.
+// Kept well under gravity's pull on a tilted ramp so it never pins a ball mid-slope.
+const STICTION_SPEED = 85; // px/s — below this, stiction bites
+const STICTION_DECEL = 55; // px/s^2 — gentle natural roll-to-stop
 // Coulomb-style impact friction: hard landings shed tangential speed in
 // proportion to impact strength (mu = surface friction). This is what makes
 // catch-ramp re-convergence possible — without it the ball converts all its
@@ -202,6 +207,12 @@ export function step(s: RunState): SimEvent[] {
         tvy *= damp;
         const tlen = len(tvx, tvy);
         let dec = surf.friction * ROLLING_K * DT;
+        // Stiction: a slow-rolling ball always grinds to a stop, even on
+        // near-frictionless ice, so a run that ends on a slide still settles
+        // instead of trickling forever. Only bites below STICTION_SPEED, so fast
+        // ice slides keep their character; and on a tilted ramp gravity's
+        // tangential pull (g*sin θ) dwarfs it, so it never traps a ball mid-slope.
+        if (tlen < STICTION_SPEED) dec += STICTION_DECEL * DT;
         if (-vn > IMPACT_FRICTION_MIN) {
           const mu = surf.friction < IMPACT_FRICTION_MAX_MU ? surf.friction : IMPACT_FRICTION_MAX_MU;
           dec += -vn * mu;
