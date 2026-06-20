@@ -18,16 +18,30 @@ const H = LOGICAL_HEIGHT;
 
 // Gate thresholds (v1-calibrated where the unit transfers).
 const MIN_RUN_TICKS = 3.5 * TICK_RATE; // ≥3.5s of motion
+// A cannon is a quick, punchy ballistic spectacle (a launched arc, like the loop's
+// ride): its appeal is the readable shot, not a long winding run, so it clears a
+// gentler run-length floor — the same reasoning that gives loop/pod their overrides.
+const MIN_RUN_TICKS_CANNON = 2.0 * TICK_RATE;
+// A circuit is a teleporter contraption (a tour through two stages); its appeal is
+// the routing, not a marathon, so it clears a slightly gentler run-length floor.
+const MIN_RUN_TICKS_CIRCUIT = 3.0 * TICK_RATE;
 // v1's calibration learning: completed runs measure ~1.6-2.0x travel; gates above
 // what the generator actually produces exhaust the search and ship fallbacks.
 // Stairs maps trade horizontal distance for turn density (v1 did the same
 // per-style override for mid-bowl: 1.25x vs 1.75x). Kicker trades distance for
 // its dramatic single kick + return ramp — a short band by design — so it gets
 // the same kind of override.
-const MIN_TRAVEL_RATIO = 1.55; // path length vs canvas width
-const MIN_TRAVEL_RATIO_STAIRS = 1.3;
-const MIN_TRAVEL_RATIO_KICKER = 1.35;
+// Lowered: a BUSY map (the ball caroming off many modifiers) covers less net path
+// than a clean sweep — the bounces partly cancel — but the journey is longer in
+// TIME and interactions, which is the actual "send it around the map" feel. So we
+// lean on the run-time + modifier-count gates and relax raw path length.
+const MIN_TRAVEL_RATIO = 1.25; // path length vs canvas width
+const MIN_TRAVEL_RATIO_STAIRS = 1.05;
+const MIN_TRAVEL_RATIO_KICKER = 1.1;
 const MIN_TRAVEL_RATIO_POD = 1.15; // a pod ends the run early (no floor slide), so less path
+// A cannon is mostly ONE big airborne arc — huge span, but the net path is short
+// (no winding band, no long floor slide), so it earns the most lenient travel bar.
+const MIN_TRAVEL_RATIO_CANNON = 0.8;
 const MIN_HORIZONTAL_RANGE = 0.45;
 const MIN_VERTICAL_RANGE = 0.6;
 const MIN_REVERSALS = 3;
@@ -35,13 +49,27 @@ const MIN_RAMP_TOUCHES = 3;
 // The interest guarantee: every shipped map must put the ball through at least
 // this many DISTINCT modifiers that measurably changed its motion — a fired
 // pad, a live bumper kick, a variant surface (ice/trampoline/conveyor) it rode,
-// a turbo ring, a teleport. Plain ramps/walls/basins never count. A map that
-// can't clear this is rejected, so "randomly generated" never means "boring".
-const MIN_TANGIBLE_MODIFIERS = 3;
+// a turbo ring, a teleport. Plain ramps/walls/basins never count. Raised from 3:
+// sparse maps (a couple of lonely modifiers) are the core "boring" complaint, so
+// every shipped map must be genuinely BUSY — the ball caroms through a real chain.
+const MIN_TANGIBLE_MODIFIERS = 5;
 const VARIANT_KINDS = new Set(["ice", "trampoline", "conveyor"]);
 const LANDING_MARGIN = 0.05; // landing must be in the central 90% of width
 const MIN_SPREAD_RATIO = 0.03; // perturbation spread: skill-readable…
-const MAX_SPREAD_RATIO = 0.55; // …but not unreadable luck
+// The READ must be a skill, not a gamble: a small change in the drop must not
+// fling the ball to a totally different place. Tightened from 0.55 — high spread
+// is the "luck" feeling we're designing AWAY from. Interest comes from
+// misdirection (below), not from outcome variance.
+const MAX_SPREAD_RATIO = 0.42;
+// Misdirection — the heart of the fun. We run the map twice: once for real, once
+// with every force/energy gimmick neutered (pads/turbos/fields/wind/belts removed,
+// ice & trampoline & conveyor surfaces made plain, bumpers made inert). The
+// distance between the two landings is how much the gimmicks REDIRECT the ball
+// from where a naive "just ramps + gravity" read would send it. A good map has a
+// big gap (a real "ohh, the boost pad carried it over" twist) — so we both GATE on
+// a minimum and REWARD it in funScore. This is what makes a map clever instead of
+// obvious, without making it random.
+const MIN_MISDIRECTION = 0.12; // landing must move ≥12% of width vs the naive read
 const PERTURB_OFFSETS = [-20, -15, -10, -6, -2, 2, 6, 10, 15, 20];
 const CLUSTER_GAP = 60; // px gap in landing-x that separates two clusters
 
@@ -201,7 +229,41 @@ export interface Validation {
   spread: number;
   /** Landing clusters across perturbed spawns (2–3 with one dominant = good puzzle). */
   clusters: number;
+  /**
+   * How far the real landing sits from a naive "just ramps + gravity" read, as a
+   * fraction of width. The gimmicks' redirect — the map's cleverness. High = a
+   * real "ohh, I didn't see that coming but it makes sense" twist; ~0 = obvious.
+   */
+  misdirection: number;
   landings: Vec2[];
+}
+
+/**
+ * A copy of the map with every FORCE/ENERGY gimmick removed but all GEOMETRY kept,
+ * so a sim of it traces what a naive player reading "ramps + gravity" would expect.
+ * Comparing this landing to the real one measures how much the gimmicks misdirect
+ * the ball (see Validation.misdirection). Pads/turbos/fields/wind/teleporters are
+ * dropped; ice/conveyor/trampoline surfaces become plain ramps; bumpers go inert.
+ */
+function neuter(map: MapDef): MapDef {
+  const out: MapDef = {
+    ...map,
+    surfaces: map.surfaces.map((s) => {
+      if (s.kind === "ice" || s.kind === "conveyor") {
+        const { belt: _belt, ...rest } = s;
+        return { ...rest, kind: "ramp", friction: 0.3 };
+      }
+      if (s.kind === "trampoline") return { ...s, kind: "ramp", restitution: 0.25 };
+      return s;
+    }),
+    bumpers: map.bumpers.map((b) => ({ ...b, kick: 0, maxHits: 0 })),
+    pads: [],
+    turbos: [],
+    teleporters: [],
+    fields: [],
+  };
+  delete out.wind;
+  return out;
 }
 
 export function validate(map: MapDef, rampIds: string[], archetype?: string): Validation {
@@ -216,23 +278,29 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
     map.surfaces.some((s) => s.id === "pod-floor") && base.landing.y < H - 110;
 
   if (!base.settled) failures.push("did not settle (timeout)");
-  if (base.ticks < MIN_RUN_TICKS) {
-    failures.push(`run too quick: ${(base.ticks / TICK_RATE).toFixed(1)}s < ${(MIN_RUN_TICKS / TICK_RATE).toFixed(1)}s`);
+  const minRunTicks =
+    archetype === "cannon" ? MIN_RUN_TICKS_CANNON : archetype === "circuit" ? MIN_RUN_TICKS_CIRCUIT : MIN_RUN_TICKS;
+  if (base.ticks < minRunTicks) {
+    failures.push(`run too quick: ${(base.ticks / TICK_RATE).toFixed(1)}s < ${(minRunTicks / TICK_RATE).toFixed(1)}s`);
   }
-  const minTravel = settledInPod
-    ? MIN_TRAVEL_RATIO_POD
-    : archetype === "stairs"
-      ? MIN_TRAVEL_RATIO_STAIRS
-      : archetype === "kicker"
-        ? MIN_TRAVEL_RATIO_KICKER
-        : MIN_TRAVEL_RATIO;
+  const minTravel = archetype === "cannon"
+    ? MIN_TRAVEL_RATIO_CANNON // a cannon stays short even if it ends in a pod
+    : settledInPod
+      ? MIN_TRAVEL_RATIO_POD
+      : archetype === "stairs"
+        ? MIN_TRAVEL_RATIO_STAIRS
+        : archetype === "kicker"
+          ? MIN_TRAVEL_RATIO_KICKER
+          : MIN_TRAVEL_RATIO;
   if (base.travel < minTravel * W) {
     failures.push(`travel too short: ${(base.travel / W).toFixed(2)}x width < ${minTravel}x`);
   }
   // A loop is a compact spectacle: the ball's "distance" is the ~2pi*R it travels
   // AROUND the loop (gated by travel above), not canvas coverage — so it gets a
-  // gentler span requirement. Elevated pods get the same gentler vertical span.
-  const minSpanX = archetype === "loop" ? 0.4 : MIN_HORIZONTAL_RANGE;
+  // gentler span requirement. Elevated pods get the same gentler vertical span. A
+  // cannon's arc is vertical-dominant (up and over), so it gets loop's gentler
+  // horizontal-span bar; its big vertical span clears the standard one easily.
+  const minSpanX = archetype === "loop" || archetype === "cannon" ? 0.4 : MIN_HORIZONTAL_RANGE;
   const minSpanY = archetype === "loop" ? 0.42 : settledInPod ? 0.3 : MIN_VERTICAL_RANGE;
   if (base.spanX < minSpanX * W) {
     failures.push(`horizontal span ${(base.spanX / W * 100).toFixed(0)}% < ${minSpanX * 100}%`);
@@ -240,7 +308,12 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   if (base.spanY < minSpanY * H) {
     failures.push(`vertical span ${(base.spanY / H * 100).toFixed(0)}% < ${minSpanY * 100}%`);
   }
-  const minReversals = settledInPod ? 2 : MIN_REVERSALS;
+  // Cannon (a clean arc) is EXEMPT from the reversal gate; a circuit's signature
+  // direction change is the WARP itself (left → right across the canvas), so one
+  // physical reversal in its descent is plenty. Pods (an early stop) get a gentle 2.
+  // The rest must zig-zag (3). Same spirit as loop being exempt from misdirection.
+  const minReversals =
+    archetype === "cannon" ? 0 : archetype === "circuit" ? 1 : settledInPod ? 2 : MIN_REVERSALS;
   if (base.reversals < minReversals) {
     failures.push(`reversals ${base.reversals} < ${minReversals}`);
   }
@@ -259,9 +332,14 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
   if (rampTouches < requiredRamps) {
     failures.push(`ramp touches ${rampTouches}/${rampGroups.size} < ${requiredRamps}`);
   }
-  if (base.tangibleModifiers < MIN_TANGIBLE_MODIFIERS) {
+  // Bands must be BUSY (≥5 — many modifiers); loop is a self-contained spectacle
+  // (the ride is the interest) so it keeps the original gentler floor. Cannon's
+  // launch pad + the rings/bumpers studded along its arc make it busy, but the arc
+  // has less room than a full descent — a middle floor between loop and the bands.
+  const minMods = archetype === "loop" || archetype === "cannon" ? 3 : MIN_TANGIBLE_MODIFIERS;
+  if (base.tangibleModifiers < minMods) {
     failures.push(
-      `only ${base.tangibleModifiers} tangible modifier(s) [${base.modifierKinds.join(", ") || "none"}] < ${MIN_TANGIBLE_MODIFIERS}`,
+      `only ${base.tangibleModifiers} tangible modifier(s) [${base.modifierKinds.join(", ") || "none"}] < ${minMods}`,
     );
   }
   for (const b of map.bumpers) {
@@ -297,7 +375,13 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
     }
   }
   const spread = spreadPx / W;
-  if (spread < MIN_SPREAD_RATIO) failures.push(`spread ${(spread * 100).toFixed(1)}% too deterministic`);
+  // A circuit is EXEMPT from the min-spread floor: its teleporter erases the spawn
+  // perturbation by construction (every nudge re-emerges at the same exit), so it is
+  // a fully deterministic contraption — the read is tracing the elaborate path, not
+  // judging uncertainty (the same spirit as loop's exemptions). The MAX still applies.
+  if (spread < MIN_SPREAD_RATIO && archetype !== "circuit") {
+    failures.push(`spread ${(spread * 100).toFixed(1)}% too deterministic`);
+  }
   if (spread > MAX_SPREAD_RATIO) failures.push(`spread ${(spread * 100).toFixed(1)}% is unreadable luck`);
 
   const xs = landings.map((l) => l.x).sort((a, b) => a - b);
@@ -306,5 +390,21 @@ export function validate(map: MapDef, rampIds: string[], archetype?: string): Va
     if (xs[i]! - xs[i - 1]! > CLUSTER_GAP) clusters++;
   }
 
-  return { pass: failures.length === 0, failures, metrics: base, spread, clusters, landings };
+  // Misdirection: where does the ball go with the gimmicks NEUTERED (the naive
+  // "ramps + gravity" read)? The distance from that to the real landing is how
+  // much the map's features actually trick you — its cleverness. A map whose
+  // gimmicks barely change the outcome is "obvious"; reject it.
+  const naive = measureRun(neuter(map));
+  const mdx = base.landing.x - naive.landing.x;
+  const mdy = base.landing.y - naive.landing.y;
+  const misdirection = Math.sqrt(mdx * mdx + mdy * mdy) / W;
+  // Loop is exempt: its appeal is the SPECTACLE of riding the loop, not tricking
+  // the eye — and neutering removes the turbo so the naive ball can't complete it,
+  // which would read as artificial misdirection anyway. Every other archetype must
+  // earn a real twist (no obvious trickle-down-to-the-basin maps).
+  if (archetype !== "loop" && misdirection < MIN_MISDIRECTION) {
+    failures.push(`misdirection ${(misdirection * 100).toFixed(1)}% < ${MIN_MISDIRECTION * 100}% (too obvious)`);
+  }
+
+  return { pass: failures.length === 0, failures, metrics: base, spread, clusters, misdirection, landings };
 }

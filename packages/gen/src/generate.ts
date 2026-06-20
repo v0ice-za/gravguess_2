@@ -24,11 +24,20 @@ import {
   type ForceField,
   type MapDef,
   type Surface,
+  type Teleporter,
   type TurboRing,
   type Vec2,
 } from "@gravguess/sim";
 
-export type ArchetypeName = "sweep" | "stairs" | "kicker" | "pinball" | "loop";
+export type ArchetypeName =
+  | "sweep"
+  | "stairs"
+  | "kicker"
+  | "pinball"
+  | "loop"
+  | "cannon"
+  | "circuit"
+  | "funnel";
 
 interface Archetype {
   name: ArchetypeName;
@@ -59,30 +68,55 @@ interface Archetype {
 // clear the reversals gate. Trampolines stay rare — bouncing down a switchback
 // is fun once, but the catch margins can't contain more than that.
 const ARCHETYPES: Archetype[] = [
-  { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 5, iceP: 0.22, trampP: 0.05, conveyP: 0.14, curve: [0.9, 1.5] },
-  { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 7, iceP: 0.2, trampP: 0.1, conveyP: 0.16, curve: [0.6, 1.0] },
-  { name: "kicker", rampLen: [0.32, 0.46], hop: [40, 50], tilt: [0.16, 0.2], maxRamps: 5, iceP: 0.2, trampP: 0.08, conveyP: 0.12, curve: [0.45, 0.85] },
+  { name: "sweep", rampLen: [0.36, 0.5], hop: [40, 50], tilt: [0.16, 0.19], maxRamps: 8, iceP: 0.22, trampP: 0.05, conveyP: 0.14, curve: [0.9, 1.5] },
+  { name: "stairs", rampLen: [0.22, 0.3], hop: [42, 52], tilt: [0.19, 0.23], maxRamps: 10, iceP: 0.2, trampP: 0.1, conveyP: 0.16, curve: [0.6, 1.0] },
+  { name: "kicker", rampLen: [0.32, 0.46], hop: [40, 50], tilt: [0.16, 0.2], maxRamps: 8, iceP: 0.2, trampP: 0.08, conveyP: 0.12, curve: [0.45, 0.85] },
   // Pinball: a wide, gentle switchback band (slow, long journey) studded with a
   // bumper on EVERY hop — the ball pings off a bumper, the catch ramp below
   // re-converges the kick, ping again. Built by the normal switchback loop; the
   // per-hop bumper is added there (PINBALL_HOP_KICK). Bigger hops give the kicked
   // ball room to ricochet before the catch grabs it.
-  { name: "pinball", rampLen: [0.34, 0.48], hop: [42, 54], tilt: [0.16, 0.19], maxRamps: 6, iceP: 0.16, trampP: 0.06, conveyP: 0.12, curve: [0.5, 0.9] },
+  { name: "pinball", rampLen: [0.34, 0.48], hop: [42, 54], tilt: [0.16, 0.19], maxRamps: 9, iceP: 0.16, trampP: 0.06, conveyP: 0.12, curve: [0.5, 0.9] },
   // Loop is built by a dedicated path (the switchback loop is a no-op via
   // maxRamps 0): a steep feeder + tangent run-up + turbo flings the ball around a
   // trackmania-style vertical loop, then it drops out the lower-left to a basin.
   { name: "loop", rampLen: [0, 0], hop: [0, 0], tilt: [0, 0], maxRamps: 0, iceP: 0, trampP: 0, conveyP: 0, curve: [0, 0] },
+  // Cannon is the FIRST skeleton that isn't a top->bottom descent: the ball drops
+  // from a LOW left spawn onto a mid-air boost pad that FLINGS it up and across the
+  // canvas in a deterministic ballistic arc, then lands on the far side (dedicated
+  // branch below; the switchback loop is a no-op via maxRamps 0). Like the loop, it
+  // is a readable SPECTACLE rather than a winding journey, so it earns relaxed
+  // run-length / travel / reversal gates in validate.ts. The direct antidote to
+  // "always starts at the top, lands at the bottom": the ball starts LOW and the
+  // journey goes UP and over.
+  { name: "cannon", rampLen: [0, 0], hop: [0, 0], tilt: [0, 0], maxRamps: 0, iceP: 0, trampP: 0, conveyP: 0, curve: [0, 0] },
+  // Circuit is a MULTI-STAGE tour: stage 1 guides the ball into a TELEPORTER that
+  // warps it to a fresh region, then the switchback loop winds stage 2 down to the
+  // basin (so these are stage-2's catch-band params). The teleporter both tours the
+  // canvas (the ball vanishes here, reappears across there) AND resets the
+  // perturbation spread, so a chained map stays a deterministic skill read. Built in
+  // the circuit block below, BEFORE the loop. See [[cannon-archetype]] sibling notes.
+  { name: "circuit", rampLen: [0.24, 0.36], hop: [40, 52], tilt: [0.16, 0.2], maxRamps: 5, iceP: 0.16, trampP: 0.05, conveyP: 0.12, curve: [0.4, 0.8] },
+  // STRUCTURALLY DIFFERENT skeleton still to come: funnel (converging chutes). In
+  // the ArchetypeName union, not yet in the rotation. (Plinko was tried and pulled:
+  // a peg field is a GAMBLING read, not the readable-misdirection skill read this
+  // game wants — see the misdirection objective in validate.ts/pipeline.ts.)
 ];
 
-// Pinball bumper tuning (tuned against the batch). Bumpers are sprinkled along
-// the COMPLETED sweep band's flight arcs, gentler than the finale bumpers
-// (620-760): each only needs to nudge the ball for a ricochet. A bumper is kept
-// only if it stays a bounded, still-settling perturbation (final landing moves
-// < PINBALL_MAX_DEFLECT and the ball doesn't get trapped) — so the proven band's
-// travel/reversals/readable-spread survive, with ricochets added on top.
+/** Every buildable archetype, for the practice picker to search one-by-one. */
+export const ARCHETYPE_NAMES: ArchetypeName[] = ARCHETYPES.map((a) => a.name);
+
+// Density tuning (tuned against the batch). EVERY band map (not just pinball) gets
+// modifiers sprinkled along its COMPLETED flight arcs so the ball caroms through a
+// BUSY journey instead of a quiet slide — the whole point of the game. Each is
+// kept only if it stays a bounded, still-settling perturbation (final landing
+// moves < DENSIFY_MAX_DEFLECT and the ball doesn't get trapped) so the proven
+// band's travel/readable-spread survive, with the ricochets added on top.
 const PINBALL_HOP_KICK: [number, number] = [260, 420];
-const PINBALL_MAX_DEFLECT = 190; // px the final landing may move before we drop a bumper
-const PINBALL_BANDS = [0.24, 0.46, 0.68]; // descent fractions to space ricochets across
+const DENSIFY_MAX_DEFLECT = 230; // px the final landing may move before we keep a modifier
+// Many descent fractions to space modifiers across the WHOLE journey (top to floor
+// approach), so the ball interacts with something at nearly every altitude.
+const DENSIFY_BANDS = [0.12, 0.22, 0.32, 0.42, 0.52, 0.62, 0.72, 0.82];
 
 // Segments per curved ramp: enough that the polyline reads as a smooth arc when
 // rendered (each Surface draws as one line), few enough to keep sim cost down.
@@ -170,7 +204,7 @@ const W = LOGICAL_WIDTH;
 const H = LOGICAL_HEIGHT;
 const SIDE_MARGIN = 40;
 const FLOOR_Y = 632;
-const PLANNED_TRAVEL_TARGET = 2.0 * W;
+const PLANNED_TRAVEL_TARGET = 3.2 * W;
 // High end extends this far past the MEASURED landing point: room for the
 // landing bounce plus the post-impact uphill roll before the ball turns back.
 const CATCH_SLACK = 160;
@@ -199,11 +233,13 @@ function probe(
   wind?: number,
   turbos?: TurboRing[],
   fields?: ForceField[],
+  teleporters?: Teleporter[],
 ): ProbeSample[] {
   const map: MapDef = { id: "probe", spawn, ballRadius: 10, surfaces, bumpers, pads };
   if (wind !== undefined) map.wind = wind;
   if (turbos && turbos.length > 0) map.turbos = turbos;
   if (fields && fields.length > 0) map.fields = fields;
+  if (teleporters && teleporters.length > 0) map.teleporters = teleporters;
   const s = createRun(map);
   const samples: ProbeSample[] = [];
   while (!s.done) {
@@ -231,11 +267,17 @@ function findCrossing(
   return null;
 }
 
-export function buildMap(seed: string): GeneratedMap {
+export function buildMap(seed: string, forceArch?: ArchetypeName): GeneratedMap {
   const rng = prngFromSeed(seed);
   const pick = (lo: number, hi: number) => lo + rng() * (hi - lo);
   const pickInt = (lo: number, hi: number) => lo + Math.floor(rng() * (hi - lo + 1));
-  const arch = ARCHETYPES[Math.floor(rng() * ARCHETYPES.length)]!;
+  // Always consume the archetype roll so the rest of the RNG stream (and thus the
+  // whole map) is identical whether or not we force the archetype — forcing simply
+  // overrides which personality the SAME geometry rolls are built with. This lets
+  // the practice picker search each archetype on a seed without skewing toward the
+  // ones that happen to pass most often (see generateDaily).
+  const archRoll = Math.floor(rng() * ARCHETYPES.length);
+  const arch = (forceArch ? ARCHETYPES.find((a) => a.name === forceArch) : undefined) ?? ARCHETYPES[archRoll]!;
 
   // Wind decided up front so EVERY construction probe accounts for it — the
   // catch ramps are built for the windy trajectory, not retrofitted. Kept well
@@ -247,6 +289,7 @@ export function buildMap(seed: string): GeneratedMap {
   const wind = windRoll < 0.28 ? windDir * windMag : undefined;
   const turbos: TurboRing[] = [];
   const fields: ForceField[] = [];
+  const teleporters: Teleporter[] = [];
 
   const surfaces: Surface[] = [
     { id: "wall-left", a: { x: 12, y: 0 }, b: { x: 12, y: H }, restitution: 0.4, friction: 0.1, kind: "wall" },
@@ -269,10 +312,66 @@ export function buildMap(seed: string): GeneratedMap {
   };
 
   // Loop spawns on the left so the feeder runs left->right into the loop bottom
-  // (the ball must enter moving +x to ride up the right side).
-  const spawnX = arch.name === "loop" ? W * pick(0.1, 0.26) : W * pick(0.18, 0.82);
-  const spawn = { x: spawnX, y: 40 };
+  // (the ball must enter moving +x to ride up the right side). Funnel spawns
+  // CENTERED above the chute throat; cannon spawns LOW on one side so the launch
+  // ramp can fling it up and across.
+  const spawnX =
+    arch.name === "loop"
+      ? W * pick(0.1, 0.26)
+      : arch.name === "funnel"
+        ? W * pick(0.44, 0.56)
+        : arch.name === "cannon"
+          ? W * pick(0.12, 0.2)
+          : arch.name === "circuit"
+            ? W * pick(0.08, 0.14) // entrance FAR left; the teleporter warps to the right
+            : W * pick(0.18, 0.82);
+  // Spawn height is varied, not pinned to the ceiling. A constant y=40 made the
+  // dashed spawn marker land in the same spot on every map — the single most
+  // templated element. It still starts safely above the first ramp's high end
+  // (pick(100,130)) so the ball drops onto it; loop's ice feeder catches higher
+  // (~72-104), so loop spawns nearer the top.
+  // Cannon spawns LOW (mid-left), not at the ceiling: it drops a short way onto a
+  // ramp and is launched up-and-across, so its drop marker is visibly NOT at the
+  // top — part of breaking the "always starts at the top" sameness.
+  const spawnY = arch.name === "loop" ? pick(34, 54) : arch.name === "cannon" ? pick(150, 210) : pick(40, 80);
+  const spawn = { x: spawnX, y: spawnY };
   let dir: 1 | -1 = spawnX < W / 2 ? 1 : -1;
+
+  // The boost pad rides ONE straight ramp. It used to always be ramp 0, whose
+  // high end sits near the top every map — so the pad was pinned to a narrow top
+  // band. Instead choose which of the first few ramps hosts it, so the pad's
+  // height varies map-to-map. That ramp is forced straight + plain so the pad
+  // sits on a predictable slope (v1 law) and its push aligns with the chord.
+  // Circuit's stage-2 band can be short (the warp drops the ball partway down), so a
+  // pad assigned to a late ramp may go untouched — pin it to ramp 0 (always reached)
+  // via the fallback below by disabling in-loop placement.
+  const padRamp = arch.name === "circuit" ? -1 : pickInt(0, 2);
+
+  // Drop one gentle booster onto a straight, plain ramp segment (hi -> lo): a
+  // mid-run speed injection that makes hop drift unpredictable (v1 law). The push
+  // follows the chord so it shoves the ball down the slope.
+  let padPlaced = false;
+  const placePad = (hi: Vec2, lo: Vec2): void => {
+    const t = pick(0.35, 0.6);
+    // Math.sqrt (not Math.hypot): sqrt is correctly-rounded so it's bit-identical
+    // across JS engines, but Math.hypot is not — and a ULP difference here shifts
+    // the pad push, which the chaotic sim amplifies until a candidate that passes
+    // in the Node publisher fails in the browser (or vice-versa). Keep the whole
+    // generator on the same +-*/ √ discipline the sim follows (see sim/vec.ts).
+    const dpx = lo.x - hi.x;
+    const dpy = lo.y - hi.y;
+    const segLen = Math.sqrt(dpx * dpx + dpy * dpy) || 1;
+    const strength = pick(220, 340);
+    pads.push({
+      id: "pad-boost",
+      // On the surface point: radius 22 vs the ball center 10px above the surface
+      // guarantees the rolling ball enters the zone.
+      pos: { x: hi.x + (lo.x - hi.x) * t, y: hi.y + (lo.y - hi.y) * t },
+      radius: 22,
+      push: { x: ((lo.x - hi.x) / segLen) * strength, y: ((lo.y - hi.y) / segLen) * strength },
+    });
+    padPlaced = true;
+  };
 
   // First ramp: high end slightly behind the spawn so the drop lands near the top.
   let highX = spawnX - dir * 40;
@@ -280,11 +379,102 @@ export function buildMap(seed: string): GeneratedMap {
   let plannedTravel = highY;
   let lipX = highX;
   let lipY = highY;
+  // Ramp 0's chord, kept as the guaranteed pad host: if the band ends before
+  // reaching the chosen padRamp (a short band), the pad falls back to ramp 0.
+  let ramp0Geom: { hi: Vec2; lo: Vec2 } | null = null;
+  // Left bound for the switchback loop. Default is the side wall, but circuit's
+  // stage-2 band is confined to the RIGHT half so it can't wind back over stage 1
+  // and the teleporter entrance (which would re-warp the ball into a loop).
+  let leftBound = SIDE_MARGIN;
+
+  // ---- Cannon: a straight-drop ballistic launch ----
+  // The ball falls from the (low, left) spawn straight onto a mid-air boost pad that
+  // FIRES it up and across the canvas in a tall arc, then it comes down on the far
+  // side. The biggest break from "always starts at the top, lands at the bottom":
+  // the ball starts LOW and the journey goes UP and over.
+  //   - Dropping STRAIGHT (no roll-in ramp) makes the launch velocity the pad's
+  //     FIXED push, independent of the ±20px perturbation — so the arc is
+  //     deterministic (a skill read, low spread), not a ballistic gamble. (A roll-in
+  //     ramp made the launch speed depend on the drop point and the spread blew up.)
+  //   - Neutered (no pad), the naive ball just drops straight to the floor below the
+  //     spawn; the launch redirects it clear across the canvas — high misdirection.
+  // The densify pass studs the arc with turbo rings the shot flies through (bumpers
+  // would reflect it off course); the basin catches the landing. It is EXEMPT from
+  // the reversal gate in validate.ts (a ballistic shot doesn't zig-zag).
+  if (arch.name === "cannon") {
+    const dropDist = pick(116, 150);
+    const padY = spawnY + dropDist;
+    pads.push({
+      id: "pad-boost",
+      pos: { x: spawnX, y: padY },
+      radius: 26,
+      // UP-and-RIGHT, chosen directly (no trig) for cross-engine bit-identity (the
+      // sim vec.ts +-*/√ discipline). pushY must exceed the fall speed
+      // (~√(2·g·dropDist) ≈ 700–800) to send the ball upward; pushX carries it far
+      // across (a wide arc → big horizontal span, lands clear of the right wall).
+      // Tuned tall+wide so the flight is consistently long enough (run length +
+      // travel) without overshooting onto the far wall.
+      push: { x: pick(510, 600), y: -pick(1460, 1600) },
+    });
+    padPlaced = true;
+    plannedTravel += 1.6 * W; // the airborne arc + slide; the validator measures the real path
+    lipX = spawnX;
+    lipY = padY;
+    dir = 1;
+    // The densify pass (turbos only for cannon — see below) studs the arc with rings
+    // the shot flies through, and the basin catches the landing.
+  }
+
+  // ---- Circuit: a multi-stage TELEPORTER tour ----
+  // Stage 1 (LEFT): the ball drops onto a ramp that guides it down-right onto a
+  // TELEPORTER. The warp sends it to a fresh region (upper-right) — the ball vanishes
+  // here and reappears across the canvas — AND collapses the perturbation spread
+  // (every nudge re-emerges at ~the exit), so the chained map stays a deterministic
+  // skill read rather than a gamble. Stage 2: the switchback loop below catches the
+  // post-warp descent and winds it to the basin, confined to the RIGHT half
+  // (leftBound) so it can't wind back onto the entrance and re-warp into a cycle.
+  if (arch.name === "circuit") {
+    // Stage 1: the ball drops STRAIGHT into a teleporter entrance just below the
+    // spawn. A straight drop is a fixed entry (every ±20px perturbation still falls
+    // into the disc), and the warp re-emits them all at ~the exit moving straight
+    // DOWN — so the spread is RESET and stage 2 is a clean top-drop descent in a
+    // fresh region, no matter what. The ball vanishes top-left, reappears across the
+    // canvas top-right, and winds all the way down: the teleporter IS the tour.
+    const enX = spawnX;
+    const enY = spawnY + pick(48, 66); // a visible drop into the portal (clears the disc reach)
+    const exX = W * pick(0.58, 0.72);
+    const exY = pick(80, 120);
+    teleporters.push({ id: "tp-0", a: { x: enX, y: enY }, b: { x: exX, y: exY }, radius: 22 });
+    plannedTravel += exX - enX; // the warp leap, for the ledger
+
+    // Stage 2 = a normal switchback descent from the warp EXIT (a fresh upper-right
+    // "drop point"): ramp 0's high end sits just behind the exit so the straight-down
+    // ball lands on it, exactly like the top-drop the band loop is built for.
+    highX = Math.min(exX + 40, W - SIDE_MARGIN);
+    highY = exY + 55;
+    dir = -1;
+    lipX = highX;
+    lipY = highY;
+    // A CONTAINMENT WALL boxes stage 2 into a fresh region on the right: the ball
+    // can't escape left toward the entrance (no re-warp) or fly off into the open
+    // (the source of the spread/chaos). It also GUARANTEES the misdirection — the
+    // real ball is boxed on the right, while the neutered (no-warp) ball drops
+    // straight to the floor on the far LEFT, outside the box.
+    leftBound = enX + 150;
+    surfaces.push({
+      id: "circuit-wall",
+      a: { x: leftBound, y: FLOOR_Y },
+      b: { x: leftBound, y: Math.min(exY - 10, 90) },
+      restitution: 0.4,
+      friction: 0.1,
+      kind: "wall",
+    });
+  }
 
   for (let i = 0; i < arch.maxRamps; i++) {
     const avgTilt = pick(arch.tilt[0], arch.tilt[1]);
     let endX = highX + dir * W * pick(arch.rampLen[0], arch.rampLen[1]);
-    endX = Math.max(SIDE_MARGIN, Math.min(W - SIDE_MARGIN, endX));
+    endX = Math.max(leftBound, Math.min(W - SIDE_MARGIN, endX));
     const span = Math.abs(endX - highX);
     if (span < 150) break;
 
@@ -292,20 +482,21 @@ export function buildMap(seed: string): GeneratedMap {
     // a concave catch bowl/scoop. `curve` is the EXTRA steepness at the catch
     // end (the lip keeps the base tilt), so the bowl is visibly curved while the
     // lip — where the ball rolls back up — never drops below the base tilt and
-    // the catch wall grabs hard. The first ramp stays straight (swing 0) so the
-    // boost pad below sits on a predictable slope (v1 law). endY is derived from
-    // the profile's true mean so the polyline lands exactly on it.
-    const swing = i === 0 ? 0 : pick(arch.curve[0], arch.curve[1]);
+    // the catch wall grabs hard. The pad's host ramp stays straight (swing 0) so
+    // the boost pad sits on a predictable slope (v1 law); every other ramp curves.
+    // endY is derived from the profile's true mean so the polyline lands on it.
+    const swing = i === padRamp ? 0 : pick(arch.curve[0], arch.curve[1]);
     const tiltHi = Math.min(avgTilt * (1 + swing), 0.5);
     const tiltLo = Math.max(avgTilt, MIN_SEG_TILT);
     const endY = highY + span * ((tiltHi + tiltLo) / 2);
     if (endY > FLOOR_Y - 110) break;
 
     const id = `ramp-${i}`;
-    // First ramp is always plain (v1 law: the boost pad assumes a predictable
-    // surface). Later ramps roll the archetype's variant odds. Conveyor belts
-    // always push downhill (a->b is high->low here).
-    const variant = i === 0 ? { kind: "ramp" as const, ...RAMP } : variantFor(rng());
+    // The pad's host ramp — and ramp 0, kept clean as the fallback host — stay
+    // plain (v1 law: the boost pad assumes a predictable surface, no
+    // ice/tramp/conveyor under it). Other ramps roll the archetype's variant
+    // odds. Conveyor belts always push downhill (a->b is high->low here).
+    const variant = i === padRamp || i === 0 ? { kind: "ramp" as const, ...RAMP } : variantFor(rng());
     const belt = variant.kind === "conveyor" ? pick(240, 360) : undefined;
     // Curved ramps render as a polyline of segments; the catch geometry the loop
     // planned (high end -> lip) is preserved, and the probe re-measures the real
@@ -330,26 +521,8 @@ export function buildMap(seed: string): GeneratedMap {
     }
     logicalRamps++;
 
-    if (i === 0) {
-      // One gentle booster on the first ramp only — mid-run speed injection
-      // makes hop drift unpredictable (v1 law). Sits on the surface, pushing
-      // down the slope.
-      const t = pick(0.35, 0.6);
-      const sx = highX + (endX - highX) * t;
-      const sy = highY + (endY - highY) * t;
-      const segLen = Math.hypot(endX - highX, endY - highY);
-      const tx = (endX - highX) / segLen;
-      const ty = (endY - highY) / segLen;
-      const strength = pick(220, 340);
-      pads.push({
-        id: "pad-boost",
-        // On the surface point: radius 22 vs the ball center 10px above the
-        // surface guarantees the rolling ball enters the zone.
-        pos: { x: sx, y: sy },
-        radius: 22,
-        push: { x: tx * strength, y: ty * strength },
-      });
-    }
+    if (i === 0) ramp0Geom = { hi: { x: highX, y: highY }, lo: { x: endX, y: endY } };
+    if (i === padRamp) placePad({ x: highX, y: highY }, { x: endX, y: endY });
 
     lipX = endX;
     lipY = endY;
@@ -364,11 +537,11 @@ export function buildMap(seed: string): GeneratedMap {
 
     // Probe the partial map: where does the ball actually come down a hop below
     // this lip? The next ramp's high end goes CATCH_SLACK beyond that point.
-    const landing = findCrossing(probe(surfaces, bumpers, pads, spawn, wind, turbos), lipX, dir, altitude);
+    const landing = findCrossing(probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters), lipX, dir, altitude);
     if (!landing) break; // ball never makes it off this lip cleanly — validator's problem
 
     let nextHighX = landing.x + dir * CATCH_SLACK;
-    nextHighX = Math.max(SIDE_MARGIN, Math.min(W - SIDE_MARGIN, nextHighX));
+    nextHighX = Math.max(leftBound, Math.min(W - SIDE_MARGIN, nextHighX));
     // The catch must reach back past the lip, or the band geometry is broken.
     if ((nextHighX - lipX) * dir < 40) break;
     highX = nextHighX;
@@ -377,25 +550,41 @@ export function buildMap(seed: string): GeneratedMap {
     dir = dir === 1 ? -1 : 1;
   }
 
-  // ---- Pinball: sprinkle ricochets along the completed band ----
-  // The band above is a clean sweep (proven travel/reversals/spread). Drop a
-  // bumper near each of several evenly-spaced altitude bands so the ricochets
-  // span the WHOLE descent (not a top cluster), keeping only the ones that stay
-  // a bounded, still-settling nudge — so the read stays fair and every descent
-  // becomes a ping... fall... ping journey instead of a quiet slide. A finale
-  // bumper is added below regardless, so pinball is never bumper-less.
-  if (arch.name === "pinball") {
+  // Guarantee the boost pad (one of every map's always-present trio): if the band
+  // ended before reaching its chosen host ramp, fall back to ramp 0 — always built
+  // and kept straight-or-gently-curved AND plain for exactly this purpose. Loop
+  // archetype has no switchback ramps, so it intentionally has no pad.
+  if (!padPlaced && ramp0Geom) placePad(ramp0Geom.hi, ramp0Geom.lo);
+
+  // ---- Densify: make EVERY band map a busy caroming journey ----
+  // The band above is a proven, deterministic descent. Now pack it: at many evenly
+  // spaced altitudes, find the ball's flight point and drop a modifier there
+  // (mostly bumpers for the ricochet, occasionally a turbo for a speed surge) so
+  // the ball pings off something at nearly every level instead of quietly sliding
+  // down. Each is re-probed and KEPT ONLY IF the ball still settles and the final
+  // landing stays bounded (< DENSIFY_MAX_DEFLECT, not trapped) — so the map stays
+  // readable (a skill guess), just far busier. This is what turns "a few lonely
+  // ramps" into "the ball goes all over the place". Runs for every band archetype;
+  // loop builds its own path below.
+  if (
+    arch.name === "sweep" ||
+    arch.name === "stairs" ||
+    arch.name === "kicker" ||
+    arch.name === "pinball" ||
+    arch.name === "cannon" ||
+    arch.name === "circuit"
+  ) {
     let placed = 0;
-    for (const frac of PINBALL_BANDS) {
+    for (const frac of DENSIFY_BANDS) {
       const targetY = spawn.y + (FLOOR_Y - spawn.y) * frac;
-      const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
       const cleanEndX = path[path.length - 1]!.x;
       // The descending flight point nearest this band's target altitude.
       let cand: ProbeSample | null = null;
       let bestD = Infinity;
       for (const p of path) {
         if (p.vy < 40) continue; // a descending flight moment, not a roll
-        if (p.y > FLOOR_Y - 130) continue; // leave the floor approach to the basin
+        if (p.y > FLOOR_Y - 120) continue; // leave the floor approach to the basin
         if (p.x < SIDE_MARGIN + 50 || p.x > W - SIDE_MARGIN - 50) continue;
         const d = Math.abs(p.y - targetY);
         if (d < bestD) {
@@ -403,20 +592,37 @@ export function buildMap(seed: string): GeneratedMap {
           cand = p;
         }
       }
-      if (!cand || bestD > 130) continue;
-      bumpers.push({
-        id: `bumper-pin-${placed}`,
-        pos: { x: cand.x, y: cand.y + 30 }, // top graze, just under the arc
-        radius: pickInt(20, 26),
-        kick: pick(PINBALL_HOP_KICK[0], PINBALL_HOP_KICK[1]),
-        maxHits: 3,
-      });
-      const test = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      if (!cand || bestD > 120) continue;
+      // Mostly bumpers; every third placement is a turbo surge for variety. Cannon
+      // is turbos ONLY: a bumper reflects its fast arc off course (the bounded check
+      // would reject it anyway), but a turbo preserves direction — a speed ring the
+      // shot rips through, deterministic, no spread cost.
+      const asTurbo = arch.name === "cannon" ? true : placed % 3 === 2;
+      if (asTurbo) {
+        // Cannon: a GENTLE ring (small boost) so the bounded check below keeps it —
+        // a strong multiplier would fling the fast arc past the deflection cap and
+        // get rejected, leaving the shot ring-less. Bands keep the punchy surge.
+        const mult = arch.name === "cannon" ? pick(1.08, 1.18) : pick(1.3, 1.55);
+        turbos.push({ id: `turbo-d${placed}`, pos: { x: cand.x, y: cand.y + 8 }, radius: 24, mult });
+      } else {
+        bumpers.push({
+          id: `bumper-d${placed}`,
+          pos: { x: cand.x, y: cand.y + 30 }, // top graze, just under the arc
+          radius: pickInt(20, 26),
+          // Cannon's arc is fast — a full hop-kick flings it off course (the bumper
+          // gets rejected by the bounded check below). A gentle nudge survives, so
+          // the shot still caroms off a ringer or two on its way down.
+          kick: arch.name === "cannon" ? pick(170, 260) : pick(PINBALL_HOP_KICK[0], PINBALL_HOP_KICK[1]),
+          maxHits: 3,
+        });
+      }
+      const test = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
       const tEnd = test[test.length - 1]!;
-      const bounded = Math.abs(tEnd.x - cleanEndX) < PINBALL_MAX_DEFLECT;
+      const bounded = Math.abs(tEnd.x - cleanEndX) < DENSIFY_MAX_DEFLECT;
       const settling = tEnd.y > FLOOR_Y - 60; // still reached the floor region
-      const notTrapped = test.length < path.length * 1.7; // no endless bounce loop
+      const notTrapped = test.length < path.length * 1.9; // no endless bounce loop
       if (bounded && settling && notTrapped) placed++;
+      else if (asTurbo) turbos.pop();
       else bumpers.pop(); // breaks fairness — drop it, try the next band
     }
   }
@@ -468,7 +674,7 @@ export function buildMap(seed: string): GeneratedMap {
     // post-kick path — that turns the finale into a genuine pinball ricochet
     // (ping off one, fall, ping off the next) instead of a single bounce.
     const placeOnFlight = (id: string, minY: number, kickLo: number, kickHi: number): number | null => {
-      const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
       let pastLip = false;
       for (const p of flight) {
         if (!pastLip && (p.x - lipX) * dir > 2) pastLip = true;
@@ -495,7 +701,7 @@ export function buildMap(seed: string): GeneratedMap {
   if (arch.name === "kicker" && logicalRamps >= 2) {
     // First-light pattern: probe the flight off the last lip, put the bumper on
     // the measured path at ball height, and hang a long return ramp beneath it.
-    const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos);
+    const flight = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
     const bx = lipX + dir * 88;
     let ballYAtBx: number | null = null;
     let pastLip = false;
@@ -549,7 +755,7 @@ export function buildMap(seed: string): GeneratedMap {
   // visible). Placed on the field-free measured path so the touch gate clears;
   // the basin re-probes afterward so it adapts to the deflected trajectory.
   if (rng() < 0.34) {
-    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos);
+    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
     for (let k = Math.floor(path.length * 0.28); k < Math.floor(path.length * 0.6); k++) {
       const p = path[k]!;
       const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
@@ -591,7 +797,7 @@ export function buildMap(seed: string): GeneratedMap {
   const hasExtra = hasVariant || fields.length > 0;
   const wantTurbo = !hasExtra || rng() < 0.3;
   if (wantTurbo) {
-    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
     // Open-air point with real speed in the mid-run. When the turbo is the
     // GUARANTEED third modifier we relax the speed bar so placement rarely fails.
     const minSpeed = hasExtra ? 260 : 140;
@@ -609,10 +815,12 @@ export function buildMap(seed: string): GeneratedMap {
   // of always on the floor — the biggest Y-axis variety lever. Built only if a
   // re-probe confirms the ball actually settles in it (a deep bowl it drops into
   // and can't bounce out of); otherwise it's removed and the floor basin below
-  // catches the ball as usual. Skipped for loop (already its own structure).
+  // catches the ball as usual. Skipped for loop (already its own structure) and for
+  // cannon (its trampoline rebound is the signature landing; a pod intercepting the
+  // arc early would steal the rebound and leave the shot a bare, reversal-less arc).
   let podSettleY: number | null = null;
-  if (arch.name !== "loop" && rng() < 0.55) {
-    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+  if (arch.name !== "loop" && arch.name !== "cannon" && rng() < 0.55) {
+    const path = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
     // Catch the ball LATE — after it has finished its band journey (and its finale
     // bumper) — at whatever raised height it's descending through, so the run
     // still earns its travel/reversals and just rests higher than the floor.
@@ -635,7 +843,7 @@ export function buildMap(seed: string): GeneratedMap {
       surfaces.push({ id: "pod-wall-l", a: { x: px - PW, y: podY }, b: { x: px - PW, y: podY - PH }, restitution: 0.22, friction: 0.3, kind: "lip" });
       surfaces.push({ id: "pod-wall-r", a: { x: px + PW, y: podY }, b: { x: px + PW, y: podY - PH }, restitution: 0.22, friction: 0.3, kind: "lip" });
       // Verify the ball comes to rest INSIDE the pod; if not, tear it back out.
-      const test = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+      const test = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
       const end = test[test.length - 1]!;
       if (Math.abs(end.y - (podY - 10)) < 46 && Math.abs(end.x - px) < PW + 12) {
         podSettleY = podY;
@@ -645,6 +853,7 @@ export function buildMap(seed: string): GeneratedMap {
         const podMap: MapDef = { id: "podcheck", spawn, ballRadius: 10, surfaces, bumpers, pads };
         if (turbos.length > 0) podMap.turbos = turbos;
         if (fields.length > 0) podMap.fields = fields;
+        if (teleporters.length > 0) podMap.teleporters = teleporters;
         if (wind !== undefined) podMap.wind = wind;
         const rs = createRun(podMap);
         while (!rs.done) step(rs);
@@ -658,10 +867,31 @@ export function buildMap(seed: string): GeneratedMap {
   }
   void podSettleY;
 
+  // Cleanup: drop any bumper/turbo the ball doesn't actually touch in the FINAL
+  // map. The density pass places modifiers one at a time, but a later placement
+  // can divert the ball off an earlier one — leaving an untouched modifier that
+  // both fails validation ("never touched") and is dead weight. Remove orphans so
+  // every modifier on the map is one the ball really hits.
+  {
+    const cleanMap: MapDef = { id: "cleancheck", spawn, ballRadius: 10, surfaces, bumpers, pads };
+    if (turbos.length > 0) cleanMap.turbos = turbos;
+    if (fields.length > 0) cleanMap.fields = fields;
+    if (teleporters.length > 0) cleanMap.teleporters = teleporters;
+    if (wind !== undefined) cleanMap.wind = wind;
+    const cs = createRun(cleanMap);
+    while (!cs.done) step(cs);
+    for (let bi = bumpers.length - 1; bi >= 0; bi--) {
+      if (!cs.touched.has(bumpers[bi]!.id)) bumpers.splice(bi, 1);
+    }
+    for (let ti = turbos.length - 1; ti >= 0; ti--) {
+      if (!cs.touched.has(turbos[ti]!.id)) turbos.splice(ti, 1);
+    }
+  }
+
   // Basin: probe the now-complete structure to find where the ball first meets
   // the floor, then build the basin around that point — near curb behind it,
   // tall far lip ahead of the slide direction.
-  const finale = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields);
+  const finale = probe(surfaces, bumpers, pads, spawn, wind, turbos, fields, teleporters);
   let floorHit: ProbeSample | null = null;
   for (const p of finale) {
     if (p.y >= FLOOR_Y - 11) {
@@ -698,6 +928,7 @@ export function buildMap(seed: string): GeneratedMap {
   const map: MapDef = { id: `gen-${seed}`, spawn, ballRadius: 10, surfaces, bumpers, pads };
   if (turbos.length > 0) map.turbos = turbos;
   if (fields.length > 0) map.fields = fields;
+  if (teleporters.length > 0) map.teleporters = teleporters;
   if (wind !== undefined) map.wind = wind;
 
   return {

@@ -36,7 +36,7 @@ export function saveMap(entry: Omit<SavedMap, "id" | "savedAt">): SavedMap[] | n
     localStorage.setItem(KEY, JSON.stringify(next));
     return next;
   } catch {
-    return null; // quota / private mode
+    return null; // quota / private mode/
   }
 }
 

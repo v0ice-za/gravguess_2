@@ -73,9 +73,17 @@ export function App() {
 
   const playPractice = useCallback(() => {
     const seed = `practice-${Math.random().toString(36).slice(2, 8)}`;
-    setLoaded(loadPractice(seed));
-    setInitialRecord(null);
-    setScreen("game");
+    // generateDaily runs a CPU-bound search (it tries several archetypes so practice
+    // shows the full variety). Flip to busy and yield first, so the menu paints the
+    // disabled state before the generation runs instead of dead-clicking.
+    setBusy(true);
+    setTimeout(() => {
+      const practice = loadPractice(seed);
+      setLoaded(practice);
+      setInitialRecord(null);
+      setBusy(false);
+      setScreen("game");
+    }, 0);
   }, []);
 
   const backToMenu = useCallback(() => {
@@ -141,7 +149,9 @@ export function App() {
             {playedToday ? "Today's result" : "Play today's map"}
             {dailyState === "missing" ? " (not published)" : ""}
           </button>
-          <button onClick={playPractice}>Practice map</button>
+          <button onClick={playPractice} disabled={busy}>
+            {busy ? "Generating…" : "Practice map"}
+          </button>
           <button onClick={() => setShowTutorial(true)}>How to play</button>
           {isAdmin && (
             <button onClick={() => setScreen("mapmaker")}>Map maker (admin)</button>
